@@ -1,0 +1,53 @@
+# Configuration for 25% subset validation training
+# Quick 3-hour training cycle for architecture validation
+
+seed: 42
+
+data:
+  h5_dir: "h5"
+  sequence_ids_25pct: "sequence_ids_25pct.txt"
+  height: 720
+  width: 1280
+  num_bins: 5
+  window_size_us: 100000.0  # 100ms window
+  min_events: 10000
+  sequence_stride: 5  # 50% overlap
+  val_ratio: 0.1  # 10% validation split
+  
+model:
+  num_input_channels: 5  # Signed voxel grid (5 temporal bins)
+  sequence_length: 10  # 10 frames @ 10Hz = 1 second
+  lstm_hidden_size: 256
+  lstm_num_layers: 2
+  dropout: 0.2
+  pretrained_backbone: true
+  
+loss:
+  lambda_translation: 1.0
+  lambda_rotation: 1.0
+  
+training:
+  batch_size: 8  # 8 sequences = 80 frames total
+  num_epochs: 20  # Quick validation
+  learning_rate: 0.0001  # 1e-4
+  weight_decay: 0.00001  # 1e-5
+  num_workers: 4
+  
+  # Learning rate scheduler
+  scheduler_factor: 0.5
+  scheduler_patience: 5
+  
+  # Early stopping
+  early_stopping_patience: 10  # Stop if no improvement for 10 epochs
+  
+logging:
+  checkpoint_dir: "checkpoints"
+  tensorboard_dir: "logs"
+  save_frequency: 1  # Save checkpoint every epoch
+  
+# Success criteria for 25% validation:
+# - Translation error: < 10%
+# - Rotation error: < 40 degrees
+# - Train/val gap: < 2x
+# - Convergence: Before epoch 20
+# If all criteria met, proceed to 100% training

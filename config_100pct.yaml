@@ -1,0 +1,51 @@
+# Configuration for 100% production training
+# Full 50-hour training for competition submission
+
+seed: 42
+
+data:
+  h5_dir: "h5"
+  sequence_ids_100pct: "sequence_ids_100pct.txt"
+  height: 720
+  width: 1280
+  num_bins: 5
+  window_size_us: 100000.0  # 100ms window
+  min_events: 10000
+  sequence_stride: 5  # 50% overlap
+  val_ratio: 0.1  # 10% validation split (27 sequences)
+  
+model:
+  num_input_channels: 5  # Signed voxel grid (5 temporal bins)
+  sequence_length: 10  # 10 frames @ 10Hz = 1 second
+  lstm_hidden_size: 256
+  lstm_num_layers: 2
+  dropout: 0.2
+  pretrained_backbone: true
+  
+loss:
+  lambda_translation: 1.0
+  lambda_rotation: 1.0
+  
+training:
+  batch_size: 8  # 8 sequences = 80 frames total
+  num_epochs: 100  # Full training
+  learning_rate: 0.0001  # 1e-4
+  weight_decay: 0.00001  # 1e-5
+  num_workers: 8  # More workers for full dataset
+  
+  # Learning rate scheduler
+  scheduler_factor: 0.5
+  scheduler_patience: 10  # More patience for full training
+  
+  # Early stopping
+  early_stopping_patience: 20  # Stop if no improvement for 20 epochs
+  
+logging:
+  checkpoint_dir: "checkpoints"
+  tensorboard_dir: "logs"
+  save_frequency: 1  # Save checkpoint every epoch
+  
+# Target performance (beat SPADES paper baseline):
+# - Translation error: < 5%
+# - Rotation error: < 10 degrees (vs SPADES 79 degrees)
+# - Composite error: Minimal train/val gap

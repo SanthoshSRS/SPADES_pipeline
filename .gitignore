@@ -1,0 +1,50 @@
+﻿# Python
+__pycache__/
+*.py[cod]
+*.so
+.Python
+env/
+venv/
+.venv/
+ENV/
+
+# Dataset (LARGE - do not upload!)
+h5/*.h5
+*.h5
+*.hdf5
+
+# Preprocessed Data (VERY LARGE)
+preprocessed_voxels_25pct/
+preprocessed_voxels_100pct/
+*.npy
+
+# Model Checkpoints
+checkpoints/*.pth
+checkpoints/*.pt
+
+# Logs
+logs/
+runs/
+*.log
+
+# Submissions
+submission/*.csv
+submission/*.zip
+
+# Generated files
+sequence_ids_*.txt
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDEs
+.vscode/
+.idea/
+
+# Jupyter
+.ipynb_checkpoints
+spades_eda.html
+
+# SPADES subdirectory
+SPADES/
