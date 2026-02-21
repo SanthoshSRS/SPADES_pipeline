@@ -15,15 +15,15 @@ from datetime import datetime
 from typing import Dict
 
 from src.data.dataset import SPADESVoxelDataset, train_val_split, ComposeTransforms, RandomIntensityScale, RandomFrameDropout
-from src.data.event_representations import SignedVoxelGridGenerator
-from src.models.cnn_lstm_voxel import VoxelCNNLSTM, count_parameters
+from src.data.event_representations import SignedVoxelGridGenerator, ThreeChannelEventFrame
+from src.models.cnn_lstm_voxel import DirectPoseCNN, count_parameters
 from src.losses.pose_loss import CompositePoseLoss
 from src.utils.metrics import compute_metrics_dict, MetricsTracker
 
 
 def parse_args():
     """Parse command line arguments."""
-    parser = argparse.ArgumentParser(description='Train VoxelCNNLSTM for pose estimation')
+    parser = argparse.ArgumentParser(description='Train DirectPoseCNN for pose estimation')
     
     parser.add_argument('--config', type=str, required=True,
                         help='Path to config YAML file')
@@ -62,13 +62,22 @@ def create_dataloaders(config: Dict, device: str):
         seed=config['seed']
     )
     
-    # Create voxel generator
-    voxel_generator = SignedVoxelGridGenerator(
-        height=config['data']['height'],
-        width=config['data']['width'],
-        num_bins=config['data']['num_bins'],
-        window_size_us=config['data']['window_size_us']
-    )
+    # Create voxel/event frame generator based on num_bins
+    if config['data']['num_bins'] == 3:
+        # 3-channel exponential decay representation
+        voxel_generator = ThreeChannelEventFrame(
+            height=config['data']['height'],
+            width=config['data']['width'],
+            window_size_us=config['data']['window_size_us']
+        )
+    else:
+        # Standard voxel grid representation
+        voxel_generator = SignedVoxelGridGenerator(
+            height=config['data']['height'],
+            width=config['data']['width'],
+            num_bins=config['data']['num_bins'],
+            window_size_us=config['data']['window_size_us']
+        )
     
     # Create augmentation transforms
     train_transform = ComposeTransforms([
@@ -278,10 +287,8 @@ def main():
     
     # Create model
     print("\nCreating model...")
-    model = VoxelCNNLSTM(
+    model = DirectPoseCNN(
         num_input_channels=config['model']['num_input_channels'],
-        lstm_hidden_size=config['model']['lstm_hidden_size'],
-        lstm_num_layers=config['model']['lstm_num_layers'],
         dropout=config['model']['dropout'],
         pretrained_backbone=config['model']['pretrained_backbone']
     )

@@ -13,8 +13,8 @@ from glob import glob
 from tqdm import tqdm
 
 from load_h5 import load_h5_data
-from src.data.event_representations import SignedVoxelGridGenerator
-from src.models.cnn_lstm_voxel import VoxelCNNLSTM
+from src.data.event_representations import SignedVoxelGridGenerator, ThreeChannelEventFrame
+from src.models.cnn_lstm_voxel import DirectPoseCNN
 
 
 def parse_args():
@@ -39,6 +39,60 @@ def parse_args():
     return parser.parse_args()
 
 
+def predict_frame_by_frame(
+    model: torch.nn.Module,
+    events: dict,
+    timestamps: np.ndarray,
+    event_generator,
+    device: torch.device,
+    timestamp_scale: float
+) -> np.ndarray:
+    """
+    Predict poses frame-by-frame (Direct CNN, no temporal model).
+    
+    Args:
+        model: Trained DirectPoseCNN model
+        events: Event dictionary from load_h5_data
+        timestamps: Array of pose timestamps
+        event_generator: ThreeChannelEventFrame or SignedVoxelGridGenerator instance
+        device: Device to run on
+        timestamp_scale: Scale for timestamps (1.0 for 1µs, 100.0 for 100µs)
+        
+    Returns:
+        predictions: Array of poses (num_timestamps, 7) [Tx, Ty, Tz, Qw, Qx, Qy, Qz]
+    """
+    model.eval()
+    predictions = []
+    
+    with torch.no_grad():
+        for ts in tqdm(timestamps * timestamp_scale, desc="Predicting"):
+            # Generate event frame for this timestamp
+            t_start = ts
+            t_end = t_start + event_generator.window_size_us
+            event_frame = event_generator.generate(events, t_start, t_end)
+            
+            # Add batch dimension: (C, H, W) → (1, C, H, W)
+            frame_tensor = torch.from_numpy(event_frame).float().unsqueeze(0).to(device)
+            
+            # Predict single pose
+            pred_trans, pred_rot = model(frame_tensor)
+            
+            # Concatenate: (1, 3) + (1, 4) → (1, 7)
+            pose = torch.cat([pred_trans, pred_rot], dim=-1)
+            predictions.append(pose.cpu().numpy())
+    
+    # Stack all predictions
+    predictions = np.vstack(predictions)  # (num_timestamps, 7)
+    
+    # Renormalize quaternions to ensure unit norm
+    quaternions = predictions[:, 3:]
+    quaternions /= np.linalg.norm(quaternions, axis=1, keepdims=True) + 1e-8
+    predictions[:, 3:] = quaternions
+    
+    return predictions
+
+
+# Keep old function for compatibility with 5-channel voxel models (can be removed later)
 def predict_sequence(
     model: torch.nn.Module,
     events: dict,
@@ -177,11 +231,11 @@ def main():
     
     config = checkpoint.get('config', {})
     
-    # Create model
-    model = VoxelCNNLSTM(
-        num_input_channels=config.get('model', {}).get('num_input_channels', 5),
-        lstm_hidden_size=config.get('model', {}).get('lstm_hidden_size', 256),
-        lstm_num_layers=config.get('model', {}).get('lstm_num_layers', 2),
+    # Create model (DirectPoseCNN for 3-channel, fallback to old model structure if needed)
+    num_input_channels = config.get('model', {}).get('num_input_channels', 3)
+    
+    model = DirectPoseCNN(
+        num_input_channels=num_input_channels,
         dropout=config.get('model', {}).get('dropout', 0.2),
         pretrained_backbone=False  # Not needed for inference
     )
@@ -192,13 +246,24 @@ def main():
     
     print(f"Model loaded successfully")
     
-    # Create voxel generator
-    voxel_generator = SignedVoxelGridGenerator(
-        height=config.get('data', {}).get('height', 720),
-        width=config.get('data', {}).get('width', 1280),
-        num_bins=config.get('data', {}).get('num_bins', 5),
-        window_size_us=config.get('data', {}).get('window_size_us', 100000.0)
-    )
+    # Create event frame generator based on num_bins
+    num_bins = config.get('data', {}).get('num_bins', 3)
+    
+    if num_bins == 3:
+        # 3-channel exponential decay representation
+        event_generator = ThreeChannelEventFrame(
+            height=config.get('data', {}).get('height', 720),
+            width=config.get('data', {}).get('width', 1280),
+            window_size_us=config.get('data', {}).get('window_size_us', 100000.0)
+        )
+    else:
+        # Standard voxel grid representation
+        event_generator = SignedVoxelGridGenerator(
+            height=config.get('data', {}).get('height', 720),
+            width=config.get('data', {}).get('width', 1280),
+            num_bins=num_bins,
+            window_size_us=config.get('data', {}).get('window_size_us', 100000.0)
+        )
     
     # Create output directory
     os.makedirs(args.output_dir, exist_ok=True)
@@ -228,12 +293,19 @@ def main():
         
         print(f"\n{seq_id}: {len(timestamps)} poses, {len(events['t'])} events")
         
-        # Run inference
-        predictions = predict_sequence(
-            model, events, timestamps,
-            voxel_generator, args.sequence_length, args.stride,
-            device, args.test_timestamp_scale
-        )
+        # Run inference (frame-by-frame for 3-channel, or sequence for voxel)
+        if num_bins == 3:
+            predictions = predict_frame_by_frame(
+                model, events, timestamps,
+                event_generator, device, args.test_timestamp_scale
+            )
+        else:
+            # Fallback to sequence prediction for compatibility
+            predictions = predict_sequence(
+                model, events, timestamps,
+                event_generator, args.sequence_length, args.stride,
+                device, args.test_timestamp_scale
+            )
         
         # Create submission CSV
         csv_path = os.path.join(args.output_dir, f"{seq_id}.csv")

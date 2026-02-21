@@ -13,7 +13,7 @@ import random
 # Add parent directory to path to import load_h5
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
 from load_h5 import load_h5_data
-from src.data.event_representations import SignedVoxelGridGenerator, filter_events_by_count
+from src.data.event_representations import SignedVoxelGridGenerator, ThreeChannelEventFrame, filter_events_by_count
 
 
 class SPADESVoxelDataset(Dataset):
@@ -26,9 +26,9 @@ class SPADESVoxelDataset(Dataset):
     Args:
         data_dir: Directory containing .h5 files
         sequence_ids: List of sequence identifiers (e.g., ['RT000', 'RT001', ...])
-        sequence_length: Number of frames per sequence (default: 10)
-        sequence_stride: Stride between sequences (default: 5, gives 50% overlap)
-        voxel_generator: VoxelGridGenerator instance
+        sequence_length: Number of frames per sequence (default: 1 for frame-by-frame)
+        sequence_stride: Stride between sequences (default: 5, ignored if sequence_length=1)
+        voxel_generator: Event representation generator instance
         min_events: Minimum events per frame filter (default: 10000)
         transform: Optional augmentation transform
         synthetic_timestamp_scale: Scale for synthetic data (100µs units) (default: 100.0)
@@ -38,9 +38,9 @@ class SPADESVoxelDataset(Dataset):
         self,
         data_dir: str,
         sequence_ids: List[str],
-        sequence_length: int = 10,
+        sequence_length: int = 1,
         sequence_stride: int = 5,
-        voxel_generator: Optional[SignedVoxelGridGenerator] = None,
+        voxel_generator: Optional = None,
         min_events: int = 10000,
         transform: Optional[callable] = None,
         synthetic_timestamp_scale: float = 100.0

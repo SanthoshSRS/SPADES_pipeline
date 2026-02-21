@@ -8,17 +8,15 @@ data:
   sequence_ids_25pct: "sequence_ids_25pct.txt"
   height: 720
   width: 1280
-  num_bins: 5
+  num_bins: 3  # 3-channel exponential decay representation
   window_size_us: 100000.0  # 100ms window
   min_events: 10000
-  sequence_stride: 5  # 50% overlap
+  sequence_stride: 5  # Not used for single-frame mode
   val_ratio: 0.1  # 10% validation split
   
 model:
-  num_input_channels: 5  # Signed voxel grid (5 temporal bins)
-  sequence_length: 10  # 10 frames @ 10Hz = 1 second
-  lstm_hidden_size: 256
-  lstm_num_layers: 2
+  num_input_channels: 3  # 3-channel exponential decay
+  sequence_length: 1  # Frame-by-frame prediction (no temporal model)
   dropout: 0.2
   pretrained_backbone: true
   
@@ -27,7 +25,7 @@ loss:
   lambda_rotation: 1.0
   
 training:
-  batch_size: 8  # 8 sequences = 80 frames total
+  batch_size: 16  # 16 single frames (can increase since no LSTM)
   num_epochs: 20  # Quick validation
   learning_rate: 0.0001  # 1e-4
   weight_decay: 0.00001  # 1e-5

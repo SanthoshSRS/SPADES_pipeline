@@ -143,6 +143,127 @@ class SignedVoxelGridGenerator:
         return self.generate(*args, **kwargs)
 
 
+class ThreeChannelEventFrame:
+    """
+    3-Channel event representation with exponential decay (SPADES paper method).
+    
+    Splits the time window into 3 sub-windows and applies exponential temporal decay
+    within each sub-window. This creates a 3-channel representation compatible with
+    RGB pretrained models (ResNet, EfficientNet, etc.).
+    
+    Paper: "SPADES: A Realistic Spacecraft Pose Estimation Dataset using Event Sensing"
+    Method: 3C (3-Channel) representation with exponential decay
+    
+    Args:
+        width: Image width (default: 1280)
+        height: Image height (default: 720)
+        window_size_us: Time window in microseconds (default: 100000 = 100ms)
+        tau_us: Exponential decay time constant in microseconds (default: 30000 = 30ms)
+    """
+    
+    def __init__(
+        self,
+        width: int = 1280,
+        height: int = 720,
+        window_size_us: float = 100000.0,
+        tau_us: float = 30000.0
+    ):
+        self.width = width
+        self.height = height
+        self.window_size_us = window_size_us
+        self.tau_us = tau_us
+        self.num_bins = 3  # For compatibility with dataset code
+        
+        # Sub-window boundaries (split into 3 equal parts)
+        self.sub_window_size = window_size_us / 3.0
+        self.sub_window_edges = [
+            0.0,
+            self.sub_window_size,
+            2 * self.sub_window_size,
+            window_size_us
+        ]
+    
+    def generate(
+        self,
+        events: Dict[str, np.ndarray],
+        t_start: float,
+        t_end: Optional[float] = None
+    ) -> np.ndarray:
+        """
+        Generate 3-channel event frame with exponential decay.
+        
+        Args:
+            events: Dictionary with keys 'x', 'y', 't' (timestamps in µs), 'p' (polarity)
+            t_start: Start timestamp in microseconds
+            t_end: End timestamp (if None, uses t_start + window_size_us)
+            
+        Returns:
+            event_frame: Array of shape (3, height, width) with exponentially decayed events
+        """
+        if t_end is None:
+            t_end = t_start + self.window_size_us
+        
+        # Filter events in time window
+        t = events['t']
+        mask = (t >= t_start) & (t < t_end)
+        
+        if not np.any(mask):
+            # No events in window, return zeros
+            return np.zeros((3, self.height, self.width), dtype=np.float32)
+        
+        x = events['x'][mask]
+        y = events['y'][mask]
+        t_filtered = t[mask]
+        p = events['p'][mask]
+        
+        # Normalize timestamps to [0, window_size_us]
+        t_normalized = t_filtered - t_start
+        
+        # Initialize 3-channel frame
+        event_frame = np.zeros((3, self.height, self.width), dtype=np.float32)
+        
+        # Process each sub-window
+        for channel_idx in range(3):
+            sub_start = self.sub_window_edges[channel_idx]
+            sub_end = self.sub_window_edges[channel_idx + 1]
+            
+            # Filter events in this sub-window
+            sub_mask = (t_normalized >= sub_start) & (t_normalized < sub_end)
+            
+            if not np.any(sub_mask):
+                continue
+            
+            x_sub = x[sub_mask]
+            y_sub = y[sub_mask]
+            t_sub = t_normalized[sub_mask]
+            p_sub = p[sub_mask]
+            
+            # Apply exponential decay: exp(-(t_window_end - t_event) / tau)
+            # Decay from end of sub-window backward
+            time_to_end = sub_end - t_sub
+            decay_weights = np.exp(-time_to_end / self.tau_us)
+            
+            # Signed accumulation: ON(+1), OFF(-1)
+            signed_polarity = 2.0 * p_sub - 1.0  # Convert 0/1 to -1/+1
+            weighted_events = signed_polarity * decay_weights
+            
+            # Accumulate into frame (clip coordinates to valid range)
+            x_clipped = np.clip(x_sub, 0, self.width - 1)
+            y_clipped = np.clip(y_sub, 0, self.height - 1)
+            
+            for i in range(len(x_clipped)):
+                event_frame[channel_idx, y_clipped[i], x_clipped[i]] += weighted_events[i]
+        
+        # Apply log normalization per channel: sign(x) * log(1 + |x|)
+        event_frame = np.sign(event_frame) * np.log1p(np.abs(event_frame))
+        
+        return event_frame
+    
+    def __call__(self, *args, **kwargs):
+        """Allow calling instance as function."""
+        return self.generate(*args, **kwargs)
+
+
 class StandardVoxelGridGenerator:
     """
     Standard 10-channel voxel grid (5 bins × 2 polarities separated).

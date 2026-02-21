@@ -40,7 +40,7 @@ except Exception as e:
     print(f"  ✗ dataset: {e}")
 
 try:
-    from src.models.cnn_lstm_voxel import VoxelCNNLSTM, count_parameters
+    from src.models.cnn_lstm_voxel import DirectPoseCNN, count_parameters
     print("  ✓ cnn_lstm_voxel")
 except Exception as e:
     print(f"  ✗ cnn_lstm_voxel: {e}")
@@ -64,9 +64,11 @@ except Exception as e:
     print(f"  ✗ visualization: {e}")
 
 # Test voxel generator
-print("\nTesting voxel generator...")
+print("\nTesting 3-channel event frame generator...")
 try:
-    voxel_gen = SignedVoxelGridGenerator(height=720, width=1280, num_bins=5)
+    from src.data.event_representations import ThreeChannelEventFrame
+    
+    event_gen = ThreeChannelEventFrame(height=720, width=1280)
     
     # Create dummy events
     dummy_events = {
@@ -76,27 +78,27 @@ try:
         't': np.random.uniform(0, 100000, 10000)
     }
     
-    voxel = voxel_gen.generate(dummy_events, 0, 100000)
-    assert voxel.shape == (5, 720, 1280), f"Expected (5, 720, 1280), got {voxel.shape}"
-    print(f"  ✓ Generated voxel grid: {voxel.shape}")
+    event_frame = event_gen.generate(dummy_events, 0, 100000)
+    assert event_frame.shape == (3, 720, 1280), f"Expected (3, 720, 1280), got {event_frame.shape}"
+    print(f"  ✓ Generated 3-channel event frame: {event_frame.shape}")
 except Exception as e:
-    print(f"  ✗ Voxel generator test failed: {e}")
+    print(f"  ✗ Event frame generator test failed: {e}")
 
 # Test model creation
 print("\nTesting model creation...")
 try:
-    model = VoxelCNNLSTM(num_input_channels=5)
+    model = DirectPoseCNN(num_input_channels=3)
     num_params = count_parameters(model)
     print(f"  ✓ Model created: {num_params:,} parameters")
     
-    # Test forward pass
-    dummy_input = torch.randn(2, 10, 5, 720, 1280)
+    # Test forward pass (single frames, not sequences)
+    dummy_input = torch.randn(8, 3, 720, 1280)
     model.eval()
     with torch.no_grad():
         trans, rot = model(dummy_input)
     
-    assert trans.shape == (2, 10, 3), f"Translation shape incorrect: {trans.shape}"
-    assert rot.shape == (2, 10, 4), f"Rotation shape incorrect: {rot.shape}"
+    assert trans.shape == (8, 3), f"Translation shape incorrect: {trans.shape}"
+    assert rot.shape == (8, 4), f"Rotation shape incorrect: {rot.shape}"
     print(f"  ✓ Forward pass successful")
     print(f"    Translation: {trans.shape}")
     print(f"    Rotation: {rot.shape}")
@@ -144,9 +146,9 @@ except Exception as e:
 if torch.cuda.is_available():
     print("\nGPU memory check...")
     try:
-        # Allocate memory for typical batch
-        dummy_batch = torch.randn(8, 10, 5, 720, 1280).cuda()
-        model_gpu = VoxelCNNLSTM(num_input_channels=5).cuda()
+        # Allocate memory for typical batch (single frames, not sequences)
+        dummy_batch = torch.randn(16, 3, 720, 1280).cuda()
+        model_gpu = DirectPoseCNN(num_input_channels=3).cuda()
         
         with torch.no_grad():
             output = model_gpu(dummy_batch)
@@ -162,9 +164,9 @@ if torch.cuda.is_available():
         del dummy_batch, model_gpu, output
         torch.cuda.empty_cache()
         
-        if memory_allocated > 12:
+        if memory_allocated > 10:
             print(f"  ⚠ Warning: Memory usage high ({memory_allocated:.2f} GB)")
-            print(f"    Consider reducing batch size if you have <16GB GPU")
+            print(f"    Consider reducing batch size if you have <12GB GPU")
     except Exception as e:
         print(f"  ✗ GPU memory test failed: {e}")
 
