@@ -315,8 +315,7 @@ def main():
         optimizer,
         mode='min',
         factor=config['training']['scheduler_factor'],
-        patience=config['training']['scheduler_patience'],
-        verbose=True
+        patience=config['training']['scheduler_patience']
     )
     
     # Create tensorboard writer
