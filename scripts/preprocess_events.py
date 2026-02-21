@@ -15,7 +15,7 @@ from multiprocessing import Pool, cpu_count
 # Add parent directory to path
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 from load_h5 import load_h5_data
-from src.data.event_representations import SignedVoxelGridGenerator, filter_events_by_count
+from src.data.event_representations import SignedVoxelGridGenerator, ThreeChannelEventFrame, filter_events_by_count
 
 
 def parse_args():
@@ -64,13 +64,23 @@ def process_sequence(args_tuple):
         events = data['events']
         labels = data['labels']
         
-        # Create voxel generator
-        voxel_generator = SignedVoxelGridGenerator(
-            height=720,
-            width=1280,
-            num_bins=config['num_bins'],
-            window_size_us=config['window_size_us']
-        )
+        # Create voxel generator based on num_bins
+        if config['num_bins'] == 3:
+            # 3-channel exponential decay representation (SPADES paper method)
+            voxel_generator = ThreeChannelEventFrame(
+                width=1280,
+                height=720,
+                window_size_us=config['window_size_us'],
+                tau_us=30000.0  # 30ms decay constant
+            )
+        else:
+            # Signed voxel grid representation (5-channel or custom)
+            voxel_generator = SignedVoxelGridGenerator(
+                height=720,
+                width=1280,
+                num_bins=config['num_bins'],
+                window_size_us=config['window_size_us']
+            )
         
         # Get timestamps
         timestamps = labels['timestamp'].values * config['timestamp_scale']
@@ -118,6 +128,9 @@ def process_sequence(args_tuple):
             f.attrs['num_bins'] = config['num_bins']
             f.attrs['window_size_us'] = config['window_size_us']
             f.attrs['min_events'] = config['min_events']
+            f.attrs['representation'] = '3channel_decay' if config['num_bins'] == 3 else 'signed_voxel'
+            if config['num_bins'] == 3:
+                f.attrs['tau_us'] = 30000.0
         
         return f"{seq_id}: {len(voxel_list)}/{num_poses} frames ({len(voxel_list)/num_poses*100:.1f}%)"
         
