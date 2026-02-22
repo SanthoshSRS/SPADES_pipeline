@@ -153,6 +153,11 @@ def train_epoch(
         gt_translation = poses[:, :, :3]
         gt_rotation = poses[:, :, 3:]
         
+        # Squeeze sequence dimension if seq_len=1 (for DirectPoseCNN frame-by-frame)
+        if gt_translation.size(1) == 1:
+            gt_translation = gt_translation.squeeze(1)  # (batch, 3)
+            gt_rotation = gt_rotation.squeeze(1)        # (batch, 4)
+        
         # Forward pass
         pred_translation, pred_rotation = model(voxels)
         
@@ -230,6 +235,11 @@ def validate(
             # Split poses
             gt_translation = poses[:, :, :3]
             gt_rotation = poses[:, :, 3:]
+            
+            # Squeeze sequence dimension if seq_len=1 (for DirectPoseCNN frame-by-frame)
+            if gt_translation.size(1) == 1:
+                gt_translation = gt_translation.squeeze(1)  # (batch, 3)
+                gt_rotation = gt_rotation.squeeze(1)        # (batch, 4)
             
             # Forward pass
             pred_translation, pred_rotation = model(voxels)
