@@ -36,7 +36,9 @@ def parse_args():
     parser.add_argument('--test-timestamp-scale', type=float, default=1.0,
                         help='Timestamp scale for test data (1.0 for real 1µs data)')
     parser.add_argument('--num-frames', type=int, default=599,
-                        help='Number of frames to predict for test data (when no labels available)')
+                        help='Number of frames to predict for test data (when no labels/template available)')
+    parser.add_argument('--template', type=str, default=None,
+                        help='Path to template.csv for exact frame counts per sequence')
     
     return parser.parse_args()
 
@@ -290,6 +292,16 @@ def main():
     # Get window size for timestamp generation
     window_size_us = config.get('data', {}).get('window_size_us', 100000.0)
     
+    # Load template if provided (for exact frame counts per sequence)
+    template_frames = {}
+    if args.template and os.path.exists(args.template):
+        template_df = pd.read_csv(args.template)
+        # Parse sequence IDs and count frames per sequence
+        for ts in template_df['timestamp']:
+            seq_id = ts.rsplit('_', 1)[0]  # RT901_001 -> RT901
+            template_frames[seq_id] = template_frames.get(seq_id, 0) + 1
+        print(f"Loaded template with {len(template_df)} total frames across {len(template_frames)} sequences")
+    
     # Process each test file
     for test_file in tqdm(test_files, desc="Processing sequences"):
         seq_id = os.path.basename(test_file).replace('.h5', '')
@@ -307,8 +319,8 @@ def main():
             # covering the event time range
             event_times = events['t']
             t_min, t_max = event_times.min(), event_times.max()
-            # Generate num_frames timestamps with window_size spacing
-            num_frames = args.num_frames
+            # Use template frame count if available, otherwise default
+            num_frames = template_frames.get(seq_id, args.num_frames)
             timestamps = np.linspace(t_min, t_max - window_size_us, num_frames)
             print(f"  Generated {num_frames} timestamps from event range [{t_min:.0f}, {t_max:.0f}] µs")
         
