@@ -25,11 +25,11 @@ loss:
   lambda_rotation: 1.0
   
 training:
-  batch_size: 16  # 16 single frames (can increase since no LSTM)
+  batch_size: 64  # Increased for A100 80GB (using only ~8GB currently)
   num_epochs: 20  # Quick validation
   learning_rate: 0.0001  # 1e-4
   weight_decay: 0.00001  # 1e-5
-  num_workers: 4
+  num_workers: 8  # Increased for faster data loading
   
   # Learning rate scheduler
   scheduler_factor: 0.5
