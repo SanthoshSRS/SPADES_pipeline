@@ -43,9 +43,7 @@ class DirectPoseCNN(nn.Module):
         
         # Modify first conv layer for event channels
         if num_input_channels != 3:
-            # Initialize 5-channel conv1 from 3-channel RGB weights
-            original_conv1 = resnet.conv1
-            For non-RGB channels, initialize conv1 from pretrained weights
+            # For non-RGB channels, initialize conv1 from pretrained weights
             original_conv1 = resnet.conv1
             
             # Create new conv1 with correct input channels
@@ -66,6 +64,8 @@ class DirectPoseCNN(nn.Module):
                     nn.init.kaiming_normal_(self.conv1.weight, mode='fan_out', nonlinearity='relu')
         else:
             # For 3 channels, use pretrained RGB weights directly (BEST for 3-channel representation!)
+            self.conv1 = resnet.conv1
+        
         # Keep rest of ResNet backbone
         self.bn1 = resnet.bn1
         self.relu = resnet.relu
@@ -78,7 +78,8 @@ class DirectPoseCNN(nn.Module):
         
         # CNN output: 512-dimensional feature vector per frame
         cnn_output_dim = 512
-        Dual regression heads (directly from CNN features, no LSTM)
+        
+        # Dual regression heads (directly from CNN features, no LSTM)
         # Translation head: predict [Tx, Ty, Tz]
         self.translation_head = nn.Sequential(
             nn.Linear(cnn_output_dim, 128),
@@ -89,8 +90,7 @@ class DirectPoseCNN(nn.Module):
         
         # Rotation head: predict [Qw, Qx, Qy, Qz] (quaternion)
         self.rotation_head = nn.Sequential(
-            nn.Linear(cnn_output_dimtial(
-            nn.Linear(lstm_hidden_size, 128),
+            nn.Linear(cnn_output_dim, 128),
             nn.ReLU(inplace=True),
             nn.Dropout(dropout),
             nn.Linear(128, 4)
