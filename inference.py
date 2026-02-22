@@ -242,18 +242,20 @@ def main():
     
     # Create model (DirectPoseCNN for 3-channel, fallback to old model structure if needed)
     num_input_channels = config.get('model', {}).get('num_input_channels', 3)
+    backbone = config.get('model', {}).get('backbone', 'resnet18')
     
     model = DirectPoseCNN(
         num_input_channels=num_input_channels,
         dropout=config.get('model', {}).get('dropout', 0.2),
-        pretrained_backbone=False  # Not needed for inference
+        pretrained_backbone=False,  # Not needed for inference
+        backbone=backbone
     )
     
     model.load_state_dict(checkpoint['model_state_dict'])
     model = model.to(device)
     model.eval()
     
-    print(f"Model loaded successfully")
+    print(f"Model loaded successfully ({backbone} backbone)")
     
     # Create event frame generator based on num_bins
     num_bins = config.get('data', {}).get('num_bins', 3)
