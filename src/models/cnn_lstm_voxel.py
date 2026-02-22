@@ -1,12 +1,12 @@
 """
 Direct CNN model for event-based pose estimation (SPADES paper baseline).
-Uses ResNet-18 backbone for frame-by-frame pose prediction without temporal modeling.
+Uses ResNet-18 or ResNet-50 backbone for frame-by-frame pose prediction without temporal modeling.
 """
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torchvision.models import resnet18, ResNet18_Weights
+from torchvision.models import resnet18, resnet50, ResNet18_Weights, ResNet50_Weights
 from typing import Tuple, Optional
 
 
@@ -22,24 +22,37 @@ class DirectPoseCNN(nn.Module):
         num_input_channels: Number of event frame channels (3 for exponential decay, 5 for voxel)
         dropout: Dropout probability (default: 0.2)
         pretrained_backbone: Use ImageNet pretrained weights (default: True)
+        backbone: 'resnet18' or 'resnet50' (default: 'resnet18')
     """
     
     def __init__(
         self,
         num_input_channels: int = 3,
         dropout: float = 0.2,
-        pretrained_backbone: bool = True
+        pretrained_backbone: bool = True,
+        backbone: str = 'resnet18'
     ):
         super(DirectPoseCNN, self).__init__()
         
         self.num_input_channels = num_input_channels
+        self.backbone_name = backbone
         
-        # CNN Backbone: ResNet-18
-        if pretrained_backbone:
-            weights = ResNet18_Weights.IMAGENET1K_V1
-            resnet = resnet18(weights=weights)
+        # Set CNN output dimension based on backbone
+        self.cnn_output_dim = 2048 if backbone == 'resnet50' else 512
+        
+        # CNN Backbone: ResNet-18 or ResNet-50
+        if backbone == 'resnet50':
+            if pretrained_backbone:
+                weights = ResNet50_Weights.IMAGENET1K_V1
+                resnet = resnet50(weights=weights)
+            else:
+                resnet = resnet50(weights=None)
         else:
-            resnet = resnet18(weights=None)
+            if pretrained_backbone:
+                weights = ResNet18_Weights.IMAGENET1K_V1
+                resnet = resnet18(weights=weights)
+            else:
+                resnet = resnet18(weights=None)
         
         # Modify first conv layer for event channels
         if num_input_channels != 3:
@@ -76,24 +89,24 @@ class DirectPoseCNN(nn.Module):
         self.layer4 = resnet.layer4
         self.avgpool = resnet.avgpool
         
-        # CNN output: 512-dimensional feature vector per frame
-        cnn_output_dim = 512
+        # Hidden dimension for regression heads (larger for ResNet-50)
+        hidden_dim = 256 if self.backbone_name == 'resnet50' else 128
         
         # Dual regression heads (directly from CNN features, no LSTM)
         # Translation head: predict [Tx, Ty, Tz]
         self.translation_head = nn.Sequential(
-            nn.Linear(cnn_output_dim, 128),
+            nn.Linear(self.cnn_output_dim, hidden_dim),
             nn.ReLU(inplace=True),
             nn.Dropout(dropout),
-            nn.Linear(128, 3)
+            nn.Linear(hidden_dim, 3)
         )
         
         # Rotation head: predict [Qw, Qx, Qy, Qz] (quaternion)
         self.rotation_head = nn.Sequential(
-            nn.Linear(cnn_output_dim, 128),
+            nn.Linear(self.cnn_output_dim, hidden_dim),
             nn.ReLU(inplace=True),
             nn.Dropout(dropout),
-            nn.Linear(128, 4)
+            nn.Linear(hidden_dim, 4)
         )
         
     def forward_cnn(self, x: torch.Tensor) -> torch.Tensor:

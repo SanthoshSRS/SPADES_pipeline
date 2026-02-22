@@ -19,6 +19,7 @@ model:
   sequence_length: 1  # Frame-by-frame prediction (no temporal model)
   dropout: 0.2
   pretrained_backbone: true
+  backbone: "resnet50"  # "resnet18" for faster training, "resnet50" for better accuracy
   
 loss:
   lambda_translation: 1.0

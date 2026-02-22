@@ -282,6 +282,76 @@ class RandomFrameDropout:
         return voxels, poses
 
 
+class SaltPepperNoise:
+    """Add salt and pepper noise to simulate hot/dead pixels in event cameras."""
+    
+    def __init__(self, amount: float = 0.02, prob: float = 0.7):
+        self.amount = amount
+        self.prob = prob
+    
+    def __call__(self, voxels: np.ndarray, poses: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+        if np.random.rand() > self.prob:
+            return voxels, poses
+        
+        # Random amount within range
+        amount = np.random.uniform(0.01, self.amount)
+        
+        for i in range(voxels.shape[0]):  # For each frame in sequence
+            frame = voxels[i]  # (C, H, W)
+            total_pixels = frame[0].size
+            num_noise = int(amount * total_pixels)
+            
+            # Get frame dimensions
+            h, w = frame.shape[1], frame.shape[2]
+            
+            # Salt (hot pixels - high positive values)
+            salt_y = np.random.randint(0, h, num_noise // 2)
+            salt_x = np.random.randint(0, w, num_noise // 2)
+            max_val = np.abs(frame).max() + 0.5 if frame.size > 0 else 1.0
+            for c in range(frame.shape[0]):
+                frame[c, salt_y, salt_x] = max_val
+            
+            # Pepper (dead pixels - zero values)
+            pepper_y = np.random.randint(0, h, num_noise // 2)
+            pepper_x = np.random.randint(0, w, num_noise // 2)
+            for c in range(frame.shape[0]):
+                frame[c, pepper_y, pepper_x] = 0.0
+            
+            voxels[i] = frame
+        
+        return voxels, poses
+
+
+class RandomErasing:
+    """Randomly erase rectangular regions to simulate dropped event packets."""
+    
+    def __init__(self, prob: float = 0.5, scale_range: Tuple[float, float] = (0.1, 0.3)):
+        self.prob = prob
+        self.scale_range = scale_range
+    
+    def __call__(self, voxels: np.ndarray, poses: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+        if np.random.rand() > self.prob:
+            return voxels, poses
+        
+        for i in range(voxels.shape[0]):  # For each frame in sequence
+            frame = voxels[i]  # (C, H, W)
+            h, w = frame.shape[1], frame.shape[2]
+            
+            # Random erase size
+            erase_h = int(np.random.uniform(*self.scale_range) * h)
+            erase_w = int(np.random.uniform(*self.scale_range) * w)
+            
+            # Random position
+            y = np.random.randint(0, max(1, h - erase_h))
+            x = np.random.randint(0, max(1, w - erase_w))
+            
+            # Erase (set to zero)
+            frame[:, y:y+erase_h, x:x+erase_w] = 0.0
+            voxels[i] = frame
+        
+        return voxels, poses
+
+
 class ComposeTransforms:
     """Compose multiple transforms."""
     

@@ -11,10 +11,13 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
+from torch.cuda.amp import autocast, GradScaler
 from datetime import datetime
 from typing import Dict
 
-from src.data.dataset import SPADESVoxelDataset, train_val_split, ComposeTransforms, RandomIntensityScale, RandomFrameDropout
+from src.data.dataset import (SPADESVoxelDataset, train_val_split, ComposeTransforms, 
+                               RandomIntensityScale, RandomFrameDropout,
+                               SaltPepperNoise, RandomErasing)
 from src.data.event_representations import SignedVoxelGridGenerator, ThreeChannelEventFrame
 from src.models.cnn_lstm_voxel import DirectPoseCNN, count_parameters
 from src.losses.pose_loss import CompositePoseLoss
@@ -34,6 +37,8 @@ def parse_args():
                         help='Path to checkpoint to resume from')
     parser.add_argument('--device', type=str, default='cuda',
                         help='Device to train on (cuda or cpu)')
+    parser.add_argument('--amp', action='store_true',
+                        help='Enable mixed precision training (AMP)')
     
     return parser.parse_args()
 
@@ -79,10 +84,12 @@ def create_dataloaders(config: Dict, device: str):
             window_size_us=config['data']['window_size_us']
         )
     
-    # Create augmentation transforms
+    # Create augmentation transforms (including event-camera specific augmentations)
     train_transform = ComposeTransforms([
         RandomIntensityScale(scale_range=(0.8, 1.2)),
-        RandomFrameDropout(drop_prob=0.1)
+        RandomFrameDropout(drop_prob=0.1),
+        SaltPepperNoise(amount=0.02, prob=0.7),  # Simulate hot/dead pixels
+        RandomErasing(prob=0.5, scale_range=(0.1, 0.3))  # Simulate dropped packets
     ])
     
     # Create datasets
@@ -137,9 +144,10 @@ def train_epoch(
     optimizer: torch.optim.Optimizer,
     device: torch.device,
     epoch: int,
-    writer: SummaryWriter
+    writer: SummaryWriter,
+    scaler: GradScaler = None
 ) -> Dict[str, float]:
-    """Train for one epoch."""
+    """Train for one epoch with optional mixed precision (AMP)."""
     
     model.train()
     metrics_tracker = MetricsTracker()
@@ -162,23 +170,34 @@ def train_epoch(
             gt_translation = gt_translation.squeeze(1)  # (batch, 3)
             gt_rotation = gt_rotation.squeeze(1)        # (batch, 4)
         
-        # Forward pass
-        pred_translation, pred_rotation = model(voxels)
+        # Zero gradients (set_to_none is slightly faster)
+        optimizer.zero_grad(set_to_none=True)
         
-        # Compute loss
-        loss, trans_loss, rot_loss = criterion(
-            pred_translation, pred_rotation,
-            gt_translation, gt_rotation
-        )
-        
-        # Backward pass
-        optimizer.zero_grad()
-        loss.backward()
-        
-        # Gradient clipping
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-        
-        optimizer.step()
+        if scaler is not None:
+            # Mixed precision training (AMP)
+            with autocast():
+                pred_translation, pred_rotation = model(voxels)
+                loss, trans_loss, rot_loss = criterion(
+                    pred_translation, pred_rotation,
+                    gt_translation, gt_rotation
+                )
+            
+            # Scaled backward pass
+            scaler.scale(loss).backward()
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            # Standard FP32 training
+            pred_translation, pred_rotation = model(voxels)
+            loss, trans_loss, rot_loss = criterion(
+                pred_translation, pred_rotation,
+                gt_translation, gt_rotation
+            )
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            optimizer.step()
         
         # Track metrics
         metrics_tracker.update(pred_translation, pred_rotation, gt_translation, gt_rotation)
@@ -301,14 +320,17 @@ def main():
     
     # Create model
     print("\nCreating model...")
+    backbone = config['model'].get('backbone', 'resnet18')
     model = DirectPoseCNN(
         num_input_channels=config['model']['num_input_channels'],
         dropout=config['model']['dropout'],
-        pretrained_backbone=config['model']['pretrained_backbone']
+        pretrained_backbone=config['model']['pretrained_backbone'],
+        backbone=backbone
     )
     model = model.to(device)
     
     num_params = count_parameters(model)
+    print(f"Model: DirectPoseCNN with {backbone} backbone")
     print(f"Model parameters: {num_params:,}")
     
     # Create loss
@@ -339,6 +361,12 @@ def main():
     writer = SummaryWriter(log_dir)
     print(f"Tensorboard logs: {log_dir}")
     
+    # Create GradScaler for AMP if enabled
+    scaler = None
+    if args.amp:
+        scaler = GradScaler()
+        print("Mixed Precision Training (AMP) enabled")
+    
     # Resume from checkpoint if specified
     start_epoch = 0
     best_val_loss = float('inf')
@@ -359,7 +387,7 @@ def main():
         print(f"\nEpoch {epoch+1}/{config['training']['num_epochs']}")
         
         # Train
-        train_metrics = train_epoch(model, train_loader, criterion, optimizer, device, epoch, writer)
+        train_metrics = train_epoch(model, train_loader, criterion, optimizer, device, epoch, writer, scaler)
         
         # Validate
         val_metrics = validate(model, val_loader, criterion, device)
