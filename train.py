@@ -112,7 +112,9 @@ def create_dataloaders(config: Dict, device: str):
         batch_size=config['training']['batch_size'],
         shuffle=True,
         num_workers=config['training']['num_workers'],
-        pin_memory=(device == 'cuda')
+        pin_memory=(device == 'cuda'),
+        prefetch_factor=4,  # Load 4 batches ahead per worker
+        persistent_workers=True  # Keep workers alive between epochs
     )
     
     val_loader = DataLoader(
@@ -120,7 +122,9 @@ def create_dataloaders(config: Dict, device: str):
         batch_size=config['training']['batch_size'],
         shuffle=False,
         num_workers=config['training']['num_workers'],
-        pin_memory=(device == 'cuda')
+        pin_memory=(device == 'cuda'),
+        prefetch_factor=4,
+        persistent_workers=True
     )
     
     return train_loader, val_loader
