@@ -130,11 +130,16 @@ class DirectPoseCNN(nn.Module):
         
         Args:
             event_frames: (batch_size, num_channels, height, width) - Single frames
+                         OR (batch_size, 1, num_channels, height, width) if sequence_length=1
             
         Returns:
             translation: (batch_size, 3) - [Tx, Ty, Tz]
             rotation: (batch_size, 4) - [Qw, Qx, Qy, Qz] normalized
         """
+        # Handle sequence dimension if present (batch_size, 1, C, H, W) -> (batch_size, C, H, W)
+        if event_frames.dim() == 5 and event_frames.size(1) == 1:
+            event_frames = event_frames.squeeze(1)
+        
         # Extract CNN features
         features = self.forward_cnn(event_frames)  # (batch_size, 512)
         
