@@ -195,15 +195,20 @@ def predict_sequence(
 def create_submission_csv(
     predictions: np.ndarray,
     timestamps: np.ndarray,
-    output_path: str
+    output_path: str,
+    seq_id: str
 ):
     """
     Create submission CSV file.
     
     Format: timestamp, Tx, Ty, Tz, Qx, Qy, Qz, Qw
+    Timestamp format: SEQID_NNN (e.g., RT901_001, RT901_002, ...)
     """
+    # Format timestamps as SEQID_NNN (1-indexed, 3-digit padded)
+    formatted_timestamps = [f"{seq_id}_{i+1:03d}" for i in range(len(predictions))]
+    
     df = pd.DataFrame({
-        'timestamp': timestamps,
+        'timestamp': formatted_timestamps,
         'Tx': predictions[:, 0],
         'Ty': predictions[:, 1],
         'Tz': predictions[:, 2],
@@ -309,7 +314,7 @@ def main():
         
         # Create submission CSV
         csv_path = os.path.join(args.output_dir, f"{seq_id}.csv")
-        create_submission_csv(predictions, timestamps, csv_path)
+        create_submission_csv(predictions, timestamps, csv_path, seq_id)
     
     print(f"\n✓ Inference complete! Submission files saved to: {args.output_dir}")
     print(f"\nTo create submission.zip:")
