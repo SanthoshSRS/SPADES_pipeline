@@ -34,20 +34,21 @@ def load_h5_data(h5_path: str) -> dict:
             "p": event_grp["ps"][()],
         }
 
-        # ---- Load labels ----
-        labels_ds = f["labels"]["data"]
-
-        labels_df = pd.DataFrame({
-            "filename": labels_ds["filename"].astype(str),
-            "Tx": labels_ds["Tx"],
-            "Ty": labels_ds["Ty"],
-            "Tz": labels_ds["Tz"],
-            "Qx": labels_ds["Qx"],
-            "Qy": labels_ds["Qy"],
-            "Qz": labels_ds["Qz"],
-            "Qw": labels_ds["Qw"],
-            "timestamp": labels_ds["timestamp"],
-        })
+        # ---- Load labels (if available - test files may not have them) ----
+        labels_df = None
+        if "labels" in f:
+            labels_ds = f["labels"]["data"]
+            labels_df = pd.DataFrame({
+                "filename": labels_ds["filename"].astype(str),
+                "Tx": labels_ds["Tx"],
+                "Ty": labels_ds["Ty"],
+                "Tz": labels_ds["Tz"],
+                "Qx": labels_ds["Qx"],
+                "Qy": labels_ds["Qy"],
+                "Qz": labels_ds["Qz"],
+                "Qw": labels_ds["Qw"],
+                "timestamp": labels_ds["timestamp"],
+            })
 
     return {
         'events': events,

@@ -35,6 +35,8 @@ def parse_args():
                         help='Stride for sliding window (1=overlap for averaging)')
     parser.add_argument('--test-timestamp-scale', type=float, default=1.0,
                         help='Timestamp scale for test data (1.0 for real 1µs data)')
+    parser.add_argument('--num-frames', type=int, default=599,
+                        help='Number of frames to predict for test data (when no labels available)')
     
     return parser.parse_args()
 
@@ -285,6 +287,9 @@ def main():
     
     print(f"\nFound {len(test_files)} test sequences")
     
+    # Get window size for timestamp generation
+    window_size_us = config.get('data', {}).get('window_size_us', 100000.0)
+    
     # Process each test file
     for test_file in tqdm(test_files, desc="Processing sequences"):
         seq_id = os.path.basename(test_file).replace('.h5', '')
@@ -294,7 +299,18 @@ def main():
         events = data['events']
         labels = data['labels']
         
-        timestamps = labels['timestamp'].values
+        # Get timestamps: from labels if available, otherwise generate from events
+        if labels is not None:
+            timestamps = labels['timestamp'].values
+        else:
+            # For test files without labels: generate evenly-spaced timestamps
+            # covering the event time range
+            event_times = events['t']
+            t_min, t_max = event_times.min(), event_times.max()
+            # Generate num_frames timestamps with window_size spacing
+            num_frames = args.num_frames
+            timestamps = np.linspace(t_min, t_max - window_size_us, num_frames)
+            print(f"  Generated {num_frames} timestamps from event range [{t_min:.0f}, {t_max:.0f}] µs")
         
         print(f"\n{seq_id}: {len(timestamps)} poses, {len(events['t'])} events")
         
