@@ -26,11 +26,11 @@ loss:
   lambda_rotation: 1.0
   
 training:
-  batch_size: 64  # Increased for A100 80GB (using only ~8GB currently)
-  num_epochs: 100  # Full training
-  learning_rate: 0.0001  # 1e-4
-  weight_decay: 0.00001  # 1e-5
-  num_workers: 8  # More workers for full dataset
+  batch_size: 64         # Increased from 8
+  num_epochs: 100  
+  learning_rate: 0.0008  # Scaled up to match the larger batch size
+  weight_decay: 0.00001  
+  num_workers: 16        # Increased from 8 to feed the A100 faster
   
   # Learning rate scheduler
   scheduler_factor: 0.5

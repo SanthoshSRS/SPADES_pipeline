@@ -175,13 +175,12 @@ def train_epoch(
         
         if scaler is not None:
             # Mixed precision training (AMP)
-            with autocast():
+            with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
                 pred_translation, pred_rotation = model(voxels)
                 loss, trans_loss, rot_loss = criterion(
                     pred_translation, pred_rotation,
                     gt_translation, gt_rotation
                 )
-            
             # Scaled backward pass
             scaler.scale(loss).backward()
             scaler.unscale_(optimizer)
@@ -309,6 +308,11 @@ def main():
     # Set device
     device = torch.device(args.device if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
+    # --- ADD THIS FOR A100 OPTIMIZATION ---
+    if device.type == 'cuda':
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+        print("Enabled TF32 for Ampere GPU acceleration")
     
     # Set random seed
     torch.manual_seed(config['seed'])
@@ -328,6 +332,9 @@ def main():
         backbone=backbone
     )
     model = model.to(device)
+    # --- ADD THIS FOR PyTorch 2.0 SPEEDUP ---
+    print("Compiling model for optimized execution...")
+    model = torch.compile(model)
     
     num_params = count_parameters(model)
     print(f"Model: DirectPoseCNN with {backbone} backbone")

@@ -43,7 +43,8 @@ class SignedVoxelGridGenerator:
         self,
         events: Dict[str, np.ndarray],
         t_start: float,
-        t_end: Optional[float] = None
+        t_end: Optional[float] = None,
+        timestamp_scale: float = 1.0
     ) -> np.ndarray:
         """
         Generate signed voxel grid from event stream.
@@ -55,6 +56,7 @@ class SignedVoxelGridGenerator:
                    t: timestamp in microseconds (float)
             t_start: Start timestamp in microseconds
             t_end: End timestamp in microseconds (if None, uses t_start + window_size_us)
+            timestamp_scale: Scale factor for timestamps (100 for synthetic, 1 for real)
             
         Returns:
             voxel_grid: Signed voxel grid of shape (num_bins, height, width)
@@ -67,14 +69,16 @@ class SignedVoxelGridGenerator:
         voxel_grid = np.zeros((self.num_bins, self.height, self.width), dtype=np.float32)
         
         # Filter events in time window
-        mask = (events['t'] >= t_start) & (events['t'] < t_end)
+        # Apply timestamp scaling for domain adaptation
+        t_scaled = events['t'] * timestamp_scale
+        mask = (t_scaled >= t_start) & (t_scaled < t_end)
         if not np.any(mask):
             return voxel_grid
         
         x = events['x'][mask]
         y = events['y'][mask]
         p = events['p'][mask]
-        t = events['t'][mask]
+        t = t_scaled[mask]
         
         # Validate coordinates
         valid_coords = (x >= 0) & (x < self.width) & (y >= 0) & (y < self.height)

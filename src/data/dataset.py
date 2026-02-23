@@ -100,64 +100,26 @@ class SPADESVoxelDataset(Dataset):
     
     def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor]:
         """
-        Get a sequence of voxel grids and poses.
-        
-        Returns:
-            voxels: Tensor of shape (sequence_length, num_bins, height, width)
-            poses: Tensor of shape (sequence_length, 7) - [Tx, Ty, Tz, Qw, Qx, Qy, Qz]
+        Get a sequence of precomputed voxel grids and poses.
         """
         seq_info = self.sequences[idx]
-        
-        # Load data (cached in memory for efficiency)
-        data = load_h5_data(seq_info['h5_path'])
-        events = data['events']
-        labels = data['labels']
-        
-        # Extract sequence
+        # Point to the preprocessed directory instead of the raw h5 directory
+        preprocessed_dir = self.data_dir.replace('h5', 'preprocessed_voxels_100pct')
+        preprocessed_path = os.path.join(preprocessed_dir, f"{seq_info['seq_id']}_voxels.h5")
         start_idx = seq_info['start_idx']
         end_idx = start_idx + self.sequence_length
-        
-        # Get pose labels for sequence
-        pose_labels = labels.iloc[start_idx:end_idx]
-        timestamps = pose_labels['timestamp'].values * self.timestamp_scale  # Convert to microseconds
-        
-        # Generate voxel grids for each frame
-        voxel_list = []
-        pose_list = []
-        
-        for i, (ts_idx, row) in enumerate(pose_labels.iterrows()):
-            t_start = timestamps[i]
-            t_end = t_start + self.voxel_generator.window_size_us
-            
-            # Check event count filter
-            if not filter_events_by_count(events, t_start, t_end, self.min_events):
-                # If insufficient events, use zero voxel grid
-                voxel = np.zeros(
-                    (self.voxel_generator.num_bins, self.voxel_generator.height, self.voxel_generator.width),
-                    dtype=np.float32
-                )
-            else:
-                # Generate voxel grid
-                voxel = self.voxel_generator.generate(events, t_start, t_end)
-            
-            # Extract pose: [Tx, Ty, Tz, Qw, Qx, Qy, Qz]
-            pose = np.array([
-                row['Tx'], row['Ty'], row['Tz'],
-                row['Qw'], row['Qx'], row['Qy'], row['Qz']
-            ], dtype=np.float32)
-            
-            voxel_list.append(voxel)
-            pose_list.append(pose)
-        
-        # Stack into tensors
-        voxels = np.stack(voxel_list, axis=0)  # (seq_len, num_bins, H, W)
-        poses = np.stack(pose_list, axis=0)    # (seq_len, 7)
-        
+        import h5py
+        with h5py.File(preprocessed_path, 'r') as f:
+            # Load precomputed data directly from disk
+            voxels = f['voxels'][start_idx:end_idx]
+            poses = f['poses'][start_idx:end_idx]
         # Apply transforms if any
         if self.transform:
             voxels, poses = self.transform(voxels, poses)
-        
         # Convert to torch tensors
+        voxels_tensor = torch.from_numpy(voxels).float()
+        poses_tensor = torch.from_numpy(poses).float()
+        return voxels_tensor, poses_tensor
         voxels_tensor = torch.from_numpy(voxels).float()
         poses_tensor = torch.from_numpy(poses).float()
         
