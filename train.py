@@ -334,10 +334,6 @@ def main():
         backbone=backbone
     )
     model = model.to(device)
-    # --- ADD THIS FOR PyTorch 2.0 SPEEDUP ---
-    print("Compiling model for optimized execution...")
-    model = torch.compile(model)
-    
     num_params = count_parameters(model)
     print(f"Model: DirectPoseCNN with {backbone} backbone")
     print(f"Model parameters: {num_params:,}")
