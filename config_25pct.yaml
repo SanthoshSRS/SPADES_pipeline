@@ -23,7 +23,7 @@ model:
   
 loss:
   lambda_translation: 1.0
-  lambda_rotation: 1.0
+  lambda_rotation: 10.0
   
 training:
   batch_size: 64  # Increased for A100 80GB (using only ~8GB currently)
