@@ -110,12 +110,7 @@ class SPADESVoxelDataset(Dataset):
         Get a sequence of precomputed voxel grids and poses.
         """
         seq_info = self.sequences[idx]
-        # Point to the preprocessed directory instead of the raw h5 directory
-        if '25pct' in self.sequence_ids_file:
-            preprocessed_dir = self.data_dir.replace('h5', 'preprocessed_voxels_25pct')
-        else:
-            preprocessed_dir = self.data_dir.replace('h5', 'preprocessed_voxels_100pct')
-        preprocessed_path = os.path.join(preprocessed_dir, f"{seq_info['seq_id']}_voxels.h5")
+        preprocessed_path = os.path.join(self.preprocessed_dir, f"{seq_info['seq_id']}_voxels.h5")
         start_idx = seq_info['start_idx']
         end_idx = start_idx + self.sequence_length
         import h5py
