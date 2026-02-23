@@ -26,9 +26,9 @@ loss:
   lambda_rotation: 10.0
   
 training:
-  batch_size: 64  # Increased for A100 80GB (using only ~8GB currently)
+  batch_size: 16  # Reduced from 64: ResNet-50 at 720x1280 OOMs at 64
   num_epochs: 20  # Quick validation
-  learning_rate: 0.0001  # 1e-4
+  learning_rate: 0.000025  # Scaled from 1e-4 with batch size (64->16, div 4)
   weight_decay: 0.00001  # 1e-5
   num_workers: 8  # Increased for faster data loading
   
