@@ -10,7 +10,7 @@ data:
   width: 1280
   num_bins: 3  # 3-channel exponential decay representation
   window_size_us: 100000.0  # 100ms window
-  min_events: 10000
+  min_events: 0  # Set to 0: correct 100ms windows have sparse events in SPADES space imagery
   sequence_stride: 5  # Not used for single-frame mode
   val_ratio: 0.1  # 10% validation split
   
