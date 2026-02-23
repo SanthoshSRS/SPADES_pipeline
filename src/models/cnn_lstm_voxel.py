@@ -120,6 +120,8 @@ class DirectPoseCNN(nn.Module):
             features: Spatial feature vector (batch_size, 512)
         """
         x = self.conv1(x)
+        print('forward_cnn input shape:', x.shape, 'dtype:', x.dtype)
+        assert x.dtype == torch.float32, f"Expected float32, got {x.dtype}"
         x = self.bn1(x)
         x = self.relu(x)
         x = self.maxpool(x)
