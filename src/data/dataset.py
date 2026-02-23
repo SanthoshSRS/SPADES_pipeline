@@ -43,7 +43,8 @@ class SPADESVoxelDataset(Dataset):
         voxel_generator: Optional = None,
         min_events: int = 10000,
         transform: Optional[callable] = None,
-        synthetic_timestamp_scale: float = 100.0
+        synthetic_timestamp_scale: float = 100.0,
+        preprocessed_dir: Optional[str] = None
     ):
         self.data_dir = data_dir
         self.sequence_ids = sequence_ids
@@ -52,17 +53,23 @@ class SPADESVoxelDataset(Dataset):
         self.min_events = min_events
         self.transform = transform
         self.timestamp_scale = synthetic_timestamp_scale
-        
+        # Set preprocessed_dir based on split
+        if preprocessed_dir is not None:
+            self.preprocessed_dir = preprocessed_dir
+        else:
+            # Default logic: if sequence_ids matches 25pct split, use 25pct dir
+            if len(sequence_ids) <= 75:
+                self.preprocessed_dir = data_dir.replace('h5', 'preprocessed_voxels_25pct')
+            else:
+                self.preprocessed_dir = data_dir.replace('h5', 'preprocessed_voxels_100pct')
         # Initialize voxel generator
         if voxel_generator is None:
             self.voxel_generator = SignedVoxelGridGenerator()
         else:
             self.voxel_generator = voxel_generator
-        
         # Build sequence index
         self.sequences = []
         self._build_sequence_index()
-        
         print(f"Dataset initialized with {len(self.sequences)} sequences from {len(sequence_ids)} trajectories")
         
     def _build_sequence_index(self):
@@ -103,9 +110,8 @@ class SPADESVoxelDataset(Dataset):
         Get a sequence of precomputed voxel grids and poses.
         """
         seq_info = self.sequences[idx]
-        # Point to the preprocessed directory instead of the raw h5 directory
-        preprocessed_dir = self.data_dir.replace('h5', 'preprocessed_voxels_100pct')
-        preprocessed_path = os.path.join(preprocessed_dir, f"{seq_info['seq_id']}_voxels.h5")
+        # Use the correct preprocessed directory
+        preprocessed_path = os.path.join(self.preprocessed_dir, f"{seq_info['seq_id']}_voxels.h5")
         start_idx = seq_info['start_idx']
         end_idx = start_idx + self.sequence_length
         import h5py

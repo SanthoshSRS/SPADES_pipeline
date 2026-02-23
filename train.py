@@ -100,7 +100,8 @@ def create_dataloaders(config: Dict, device: str):
         sequence_stride=config['data']['sequence_stride'],
         voxel_generator=voxel_generator,
         min_events=config['data']['min_events'],
-        transform=train_transform
+        transform=train_transform,
+        preprocessed_dir="preprocessed_voxels_25pct"
     )
     
     val_dataset = SPADESVoxelDataset(
@@ -110,7 +111,8 @@ def create_dataloaders(config: Dict, device: str):
         sequence_stride=config['data']['sequence_stride'],
         voxel_generator=voxel_generator,
         min_events=config['data']['min_events'],
-        transform=None  # No augmentation for validation
+        transform=None,
+        preprocessed_dir="preprocessed_voxels_25pct"
     )
     
     # Create dataloaders
