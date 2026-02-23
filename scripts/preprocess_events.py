@@ -95,12 +95,14 @@ def process_sequence(args_tuple):
             t_end = t_start + config['window_size_us']
             
             # Check event count filter
-            if not filter_events_by_count(events, t_start, t_end, config['min_events']):
+            if not filter_events_by_count(events, t_start, t_end, config['min_events'],
+                                          timestamp_scale=config['timestamp_scale']):
                 # Skip frames with insufficient events
                 continue
-            
+
             # Generate voxel grid
-            voxel = voxel_generator.generate(events, t_start, t_end)
+            voxel = voxel_generator.generate(events, t_start, t_end,
+                                             timestamp_scale=config['timestamp_scale'])
             voxel_list.append(voxel)
             valid_indices.append(i)
         

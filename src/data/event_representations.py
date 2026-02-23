@@ -191,35 +191,38 @@ class ThreeChannelEventFrame:
         self,
         events: Dict[str, np.ndarray],
         t_start: float,
-        t_end: Optional[float] = None
+        t_end: Optional[float] = None,
+        timestamp_scale: float = 1.0
     ) -> np.ndarray:
         """
         Generate 3-channel event frame with exponential decay.
-        
+
         Args:
-            events: Dictionary with keys 'x', 'y', 't' (timestamps in µs), 'p' (polarity)
-            t_start: Start timestamp in microseconds
+            events: Dictionary with keys 'x', 'y', 't', 'p' (polarity)
+            t_start: Start timestamp (same units as t_start/t_end after scaling)
             t_end: End timestamp (if None, uses t_start + window_size_us)
-            
+            timestamp_scale: Scale factor applied to events['t'] to match t_start units
+                            (e.g. 100.0 when events are in 100µs units and t_start is in µs)
+
         Returns:
             event_frame: Array of shape (3, height, width) with exponentially decayed events
         """
         if t_end is None:
             t_end = t_start + self.window_size_us
-        
-        # Filter events in time window
-        t = events['t']
+
+        # Scale events timestamps to match t_start/t_end units
+        t = events['t'] * timestamp_scale
         mask = (t >= t_start) & (t < t_end)
-        
+
         if not np.any(mask):
             # No events in window, return zeros
             return np.zeros((3, self.height, self.width), dtype=np.float32)
-        
+
         x = events['x'][mask]
         y = events['y'][mask]
         t_filtered = t[mask]
         p = events['p'][mask]
-        
+
         # Normalize timestamps to [0, window_size_us]
         t_normalized = t_filtered - t_start
         
@@ -360,20 +363,24 @@ def filter_events_by_count(
     events: Dict[str, np.ndarray],
     t_start: float,
     t_end: float,
-    min_events: int = 10000
+    min_events: int = 10000,
+    timestamp_scale: float = 1.0
 ) -> bool:
     """
     Filter events by minimum count threshold.
-    
+
     Args:
         events: Event dictionary
-        t_start: Start timestamp
+        t_start: Start timestamp (in same units as t_start/t_end)
         t_end: End timestamp
         min_events: Minimum number of events required
-        
+        timestamp_scale: Scale factor applied to events['t'] to match t_start units
+                        (e.g. 100.0 when events are in 100µs units and t_start is in µs)
+
     Returns:
         valid: True if event count >= min_events
     """
-    mask = (events['t'] >= t_start) & (events['t'] < t_end)
+    t_scaled = events['t'] * timestamp_scale
+    mask = (t_scaled >= t_start) & (t_scaled < t_end)
     event_count = np.sum(mask)
     return event_count >= min_events

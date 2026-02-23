@@ -3,16 +3,12 @@ SPADES Dataset class for loading event sequences and generating voxel grids.
 """
 
 import os
-import sys
 import numpy as np
 import torch
 from torch.utils.data import Dataset
 from typing import Dict, List, Tuple, Optional
 import random
 
-# Add parent directory to path to import load_h5
-sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
-from load_h5 import load_h5_data
 from src.data.event_representations import SignedVoxelGridGenerator, ThreeChannelEventFrame, filter_events_by_count
 
 
@@ -73,33 +69,28 @@ class SPADESVoxelDataset(Dataset):
         print(f"Dataset initialized with {len(self.sequences)} sequences from {len(sequence_ids)} trajectories")
         
     def _build_sequence_index(self):
-        """Build index of all valid sequences across trajectories."""
+        """Build index of all valid sequences from preprocessed voxel files."""
+        import h5py
+        print(f"  Loading voxels from: {self.preprocessed_dir}")
         for seq_id in self.sequence_ids:
-            h5_path = os.path.join(self.data_dir, f"{seq_id}.h5")
-            
-            if not os.path.exists(h5_path):
-                print(f"Warning: {h5_path} not found, skipping...")
+            preprocessed_path = os.path.join(self.preprocessed_dir, f"{seq_id}_voxels.h5")
+
+            if not os.path.exists(preprocessed_path):
+                print(f"Warning: {preprocessed_path} not found, skipping...")
                 continue
-            
+
             try:
-                # Load data to get pose count
-                data = load_h5_data(h5_path)
-                events = data['events']
-                labels = data['labels']
-                
-                num_poses = len(labels)
-                
-                # Generate sequence start indices with stride
-                for start_idx in range(0, num_poses - self.sequence_length + 1, self.sequence_stride):
+                with h5py.File(preprocessed_path, 'r') as f:
+                    num_valid_frames = f['voxels'].shape[0]
+
+                for start_idx in range(0, num_valid_frames - self.sequence_length + 1, self.sequence_stride):
                     self.sequences.append({
                         'seq_id': seq_id,
-                        'h5_path': h5_path,
                         'start_idx': start_idx,
-                        'num_poses': num_poses
                     })
-                    
+
             except Exception as e:
-                print(f"Error loading {h5_path}: {e}")
+                print(f"Error loading {preprocessed_path}: {e}")
                 continue
     
     def __len__(self) -> int:
@@ -121,10 +112,6 @@ class SPADESVoxelDataset(Dataset):
             voxels, poses = self.transform(voxels, poses)
         voxels_tensor = torch.from_numpy(voxels).float()
         poses_tensor = torch.from_numpy(poses).float()
-        return voxels_tensor, poses_tensor
-        voxels_tensor = torch.from_numpy(voxels).float()
-        poses_tensor = torch.from_numpy(poses).float()
-        
         return voxels_tensor, poses_tensor
 
 
