@@ -10,7 +10,7 @@ data:
   width: 1280
   num_bins: 3  # 3-channel exponential decay representation
   window_size_us: 100000.0  # 100ms window
-  min_events: 10000
+  min_events: 0  # space imagery is sparse in 100ms windows
   sequence_stride: 5  # Not used for single-frame mode
   val_ratio: 0.1  # 10% validation split (27 sequences)
   
@@ -23,12 +23,12 @@ model:
   
 loss:
   lambda_translation: 1.0
-  lambda_rotation: 1.0
+  lambda_rotation: 10.0  # balance rotation vs translation gradient magnitudes
   
 training:
-  batch_size: 64         # Increased from 8
-  num_epochs: 100  
-  learning_rate: 0.0008  # Scaled up to match the larger batch size
+  batch_size: 16         # 64 OOMs on A100 at 720x1280 with ResNet-50
+  num_epochs: 100
+  learning_rate: 0.000025  # linear scale with batch: 64->16, /4 from 1e-4
   weight_decay: 0.00001  
   num_workers: 16        # Increased from 8 to feed the A100 faster
   

@@ -305,11 +305,62 @@ class RandomErasing:
 
 class ComposeTransforms:
     """Compose multiple transforms."""
-    
+
     def __init__(self, transforms: List[callable]):
         self.transforms = transforms
-    
+
     def __call__(self, voxels: np.ndarray, poses: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
         for transform in self.transforms:
             voxels, poses = transform(voxels, poses)
         return voxels, poses
+
+
+class DomainVoxelDataset(Dataset):
+    """
+    Label-free voxel dataset for DANN domain adaptation.
+
+    Loads preprocessed voxel H5 files (no pose labels required).
+    Used to feed real test-set event frames into the domain discriminator during training.
+
+    Args:
+        preprocessed_dir: Directory containing *_voxels.h5 files (no poses needed)
+        sequence_length: Frames per sample — must match the GRU model's sequence_length
+        sequence_stride: Step between consecutive windows (default: 1)
+    """
+
+    def __init__(
+        self,
+        preprocessed_dir: str,
+        sequence_length: int = 10,
+        sequence_stride: int = 1,
+    ):
+        self.preprocessed_dir = preprocessed_dir
+        self.sequence_length = sequence_length
+        self.sequence_stride = sequence_stride
+        self.windows: List[Tuple[str, int]] = []  # (h5_path, start_idx)
+        self._build_index()
+        print(f"DomainVoxelDataset: {len(self.windows)} windows from {preprocessed_dir}")
+
+    def _build_index(self):
+        import h5py
+        import glob
+        h5_files = sorted(glob.glob(os.path.join(self.preprocessed_dir, "*_voxels.h5")))
+        for path in h5_files:
+            try:
+                with h5py.File(path, 'r') as f:
+                    n = f['voxels'].shape[0]
+                for start in range(0, n - self.sequence_length + 1, self.sequence_stride):
+                    self.windows.append((path, start))
+            except Exception as e:
+                print(f"Warning: could not read {path}: {e}")
+
+    def __len__(self) -> int:
+        return len(self.windows)
+
+    def __getitem__(self, idx: int) -> torch.Tensor:
+        import h5py
+        path, start = self.windows[idx]
+        end = start + self.sequence_length
+        with h5py.File(path, 'r') as f:
+            voxels = f['voxels'][start:end]
+        return torch.from_numpy(voxels).float()  # (seq_len, C, H, W)

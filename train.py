@@ -15,11 +15,12 @@ from torch.cuda.amp import autocast, GradScaler
 from datetime import datetime
 from typing import Dict
 
-from src.data.dataset import (SPADESVoxelDataset, train_val_split, ComposeTransforms, 
-                               RandomIntensityScale, RandomFrameDropout,
+from src.data.dataset import (SPADESVoxelDataset, DomainVoxelDataset, train_val_split,
+                               ComposeTransforms, RandomIntensityScale, RandomFrameDropout,
                                SaltPepperNoise, RandomErasing)
 from src.data.event_representations import SignedVoxelGridGenerator, ThreeChannelEventFrame
 from src.models.cnn_lstm_voxel import DirectPoseCNN, count_parameters
+from src.models.domain_adaptive_pose_net import DomainAdaptivePoseNet
 from src.losses.pose_loss import CompositePoseLoss
 from src.utils.metrics import compute_metrics_dict, MetricsTracker
 
@@ -39,7 +40,14 @@ def parse_args():
                         help='Device to train on (cuda or cpu)')
     parser.add_argument('--amp', action='store_true',
                         help='Enable mixed precision training (AMP)')
-    
+    parser.add_argument('--preprocessed-dir', type=str, default=None,
+                        help='Directory with preprocessed voxel H5 files. '
+                             'Defaults to preprocessed_voxels_<data-subset>.')
+    parser.add_argument('--dann', action='store_true',
+                        help='Enable DANN domain adaptation (requires sequence_length > 1)')
+    parser.add_argument('--dann-test-dir', type=str, default=None,
+                        help='Directory with preprocessed real test voxels for DANN')
+
     return parser.parse_args()
 
 
@@ -50,7 +58,7 @@ def load_config(config_path: str) -> Dict:
     return config
 
 
-def create_dataloaders(config: Dict, device: str):
+def create_dataloaders(config: Dict, device: str, preprocessed_dir: str = None):
     """Create training and validation dataloaders."""
     
     # Load sequence IDs based on subset
@@ -101,7 +109,7 @@ def create_dataloaders(config: Dict, device: str):
         voxel_generator=voxel_generator,
         min_events=config['data']['min_events'],
         transform=train_transform,
-        preprocessed_dir="preprocessed_voxels_25pct"
+        preprocessed_dir=preprocessed_dir
     )
     
     val_dataset = SPADESVoxelDataset(
@@ -112,7 +120,7 @@ def create_dataloaders(config: Dict, device: str):
         voxel_generator=voxel_generator,
         min_events=config['data']['min_events'],
         transform=None,
-        preprocessed_dir="preprocessed_voxels_25pct"
+        preprocessed_dir=preprocessed_dir
     )
     
     # Create dataloaders
@@ -139,6 +147,30 @@ def create_dataloaders(config: Dict, device: str):
     return train_loader, val_loader
 
 
+def compute_grl_alpha(epoch: int, total_epochs: int) -> float:
+    """Standard DANN schedule: sigmoid ramp from 0 → 1 over training."""
+    import math
+    p = epoch / max(total_epochs, 1)
+    return 2.0 / (1.0 + math.exp(-10.0 * p)) - 1.0
+
+
+def _model_forward(model, voxels):
+    """Call model and always return (trans, rot, domain_logits|None)."""
+    out = model(voxels)
+    if isinstance(out, tuple) and len(out) == 3:
+        return out[0], out[1], out[2]
+    return out[0], out[1], None
+
+
+def _get_last_pose(poses):
+    """Return the last pose in a sequence batch.
+
+    poses: (batch, seq_len, 7)  or  (batch, 1, 7) → (batch, 3), (batch, 4)
+    """
+    last = poses[:, -1]  # (batch, 7)
+    return last[:, :3], last[:, 3:]
+
+
 def train_epoch(
     model: nn.Module,
     dataloader: DataLoader,
@@ -147,74 +179,90 @@ def train_epoch(
     device: torch.device,
     epoch: int,
     writer: SummaryWriter,
-    scaler: GradScaler = None
+    scaler: GradScaler = None,
+    dann_loader=None,
+    lambda_domain: float = 0.0,
 ) -> Dict[str, float]:
     """Train for one epoch with optional mixed precision (AMP)."""
     
     model.train()
     metrics_tracker = MetricsTracker()
-    
+
     total_loss = 0.0
     total_trans_loss = 0.0
     total_rot_loss = 0.0
     num_batches = 0
-    
+
+    # DANN: cycle over real test voxels alongside synthetic training batches
+    domain_iter = iter(dann_loader) if dann_loader is not None else None
+    domain_criterion = nn.CrossEntropyLoss()
+
     for batch_idx, (voxels, poses) in enumerate(dataloader):
-        voxels = voxels.to(device)  # (batch, seq_len, num_channels, H, W)
+        voxels = voxels.to(device)  # (batch, seq_len, C, H, W)
         poses = poses.to(device)    # (batch, seq_len, 7)
-        
-        # Split poses
-        gt_translation = poses[:, :, :3]
-        gt_rotation = poses[:, :, 3:]
-        
-        # Squeeze sequence dimension if seq_len=1 (for DirectPoseCNN frame-by-frame)
-        if gt_translation.size(1) == 1:
-            gt_translation = gt_translation.squeeze(1)  # (batch, 3)
-            gt_rotation = gt_rotation.squeeze(1)        # (batch, 4)
-        
-        # Zero gradients (set_to_none is slightly faster)
+
+        gt_translation, gt_rotation = _get_last_pose(poses)
+
         optimizer.zero_grad(set_to_none=True)
-        
+
         if scaler is not None:
-            # Mixed precision training (AMP)
             with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
-                pred_translation, pred_rotation = model(voxels)
+                pred_translation, pred_rotation, domain_logits = _model_forward(model, voxels)
                 loss, trans_loss, rot_loss = criterion(
-                    pred_translation, pred_rotation,
-                    gt_translation, gt_rotation
+                    pred_translation, pred_rotation, gt_translation, gt_rotation
                 )
-            # Scaled backward pass
+                if domain_logits is not None and lambda_domain > 0 and domain_iter is not None:
+                    # Synthetic domain label = 0
+                    syn_labels = torch.zeros(voxels.size(0), dtype=torch.long, device=device)
+                    d_loss = domain_criterion(domain_logits, syn_labels)
+                    # Real domain: label = 1
+                    try:
+                        real_voxels = next(domain_iter).to(device)
+                    except StopIteration:
+                        domain_iter = iter(dann_loader)
+                        real_voxels = next(domain_iter).to(device)
+                    _, _, real_domain_logits = _model_forward(model, real_voxels)
+                    real_labels = torch.ones(real_voxels.size(0), dtype=torch.long, device=device)
+                    d_loss = d_loss + domain_criterion(real_domain_logits, real_labels)
+                    loss = loss + lambda_domain * d_loss
             scaler.scale(loss).backward()
             scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             scaler.step(optimizer)
             scaler.update()
         else:
-            # Standard FP32 training
-            pred_translation, pred_rotation = model(voxels)
+            pred_translation, pred_rotation, domain_logits = _model_forward(model, voxels)
             loss, trans_loss, rot_loss = criterion(
-                pred_translation, pred_rotation,
-                gt_translation, gt_rotation
+                pred_translation, pred_rotation, gt_translation, gt_rotation
             )
+            if domain_logits is not None and lambda_domain > 0 and domain_iter is not None:
+                syn_labels = torch.zeros(voxels.size(0), dtype=torch.long, device=device)
+                d_loss = domain_criterion(domain_logits, syn_labels)
+                try:
+                    real_voxels = next(domain_iter).to(device)
+                except StopIteration:
+                    domain_iter = iter(dann_loader)
+                    real_voxels = next(domain_iter).to(device)
+                _, _, real_domain_logits = _model_forward(model, real_voxels)
+                real_labels = torch.ones(real_voxels.size(0), dtype=torch.long, device=device)
+                d_loss = d_loss + domain_criterion(real_domain_logits, real_labels)
+                loss = loss + lambda_domain * d_loss
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
-        
-        # Track metrics
+
         metrics_tracker.update(pred_translation, pred_rotation, gt_translation, gt_rotation)
-        
+
         total_loss += loss.item()
         total_trans_loss += trans_loss.item()
         total_rot_loss += rot_loss.item()
         num_batches += 1
-        
-        # Log every 10 batches
+
         if (batch_idx + 1) % 10 == 0:
             global_step = epoch * len(dataloader) + batch_idx
             writer.add_scalar('Train/Batch/Loss', loss.item(), global_step)
             writer.add_scalar('Train/Batch/TransLoss', trans_loss.item(), global_step)
             writer.add_scalar('Train/Batch/RotLoss', rot_loss.item(), global_step)
-            
             print(f"  Batch [{batch_idx+1}/{len(dataloader)}] - "
                   f"Loss: {loss.item():.4f}, Trans: {trans_loss.item():.4f}, Rot: {rot_loss.item():.4f}")
     
@@ -255,20 +303,11 @@ def validate(
         for voxels, poses in dataloader:
             voxels = voxels.to(device)
             poses = poses.to(device)
-            
-            # Split poses
-            gt_translation = poses[:, :, :3]
-            gt_rotation = poses[:, :, 3:]
-            
-            # Squeeze sequence dimension if seq_len=1 (for DirectPoseCNN frame-by-frame)
-            if gt_translation.size(1) == 1:
-                gt_translation = gt_translation.squeeze(1)  # (batch, 3)
-                gt_rotation = gt_rotation.squeeze(1)        # (batch, 4)
-            
-            # Forward pass
-            pred_translation, pred_rotation = model(voxels)
-            
-            # Compute loss
+
+            gt_translation, gt_rotation = _get_last_pose(poses)
+
+            pred_translation, pred_rotation, _ = _model_forward(model, voxels)
+
             loss, trans_loss, rot_loss = criterion(
                 pred_translation, pred_rotation,
                 gt_translation, gt_rotation
@@ -319,23 +358,60 @@ def main():
     # Set random seed
     torch.manual_seed(config['seed'])
     
+    # Resolve preprocessed directory
+    preprocessed_dir = args.preprocessed_dir or f"preprocessed_voxels_{args.data_subset}"
+    print(f"Preprocessed voxels dir: {preprocessed_dir}")
+
     # Create dataloaders
     print("\nCreating dataloaders...")
-    train_loader, val_loader = create_dataloaders(config, args.device)
+    train_loader, val_loader = create_dataloaders(config, args.device, preprocessed_dir)
     print(f"Train batches: {len(train_loader)}, Val batches: {len(val_loader)}")
-    
-    # Create model
+
+    # DANN domain dataloader (real test voxels, no labels)
+    dann_loader = None
+    if args.dann:
+        if not args.dann_test_dir:
+            raise ValueError("--dann requires --dann-test-dir pointing to preprocessed real test voxels")
+        seq_len = config['model']['sequence_length']
+        if seq_len < 2:
+            raise ValueError("--dann requires sequence_length >= 2 in config (GRU model)")
+        dann_dataset = DomainVoxelDataset(
+            preprocessed_dir=args.dann_test_dir,
+            sequence_length=seq_len,
+        )
+        dann_loader = DataLoader(
+            dann_dataset,
+            batch_size=config['training']['batch_size'],
+            shuffle=True,
+            num_workers=config['training']['num_workers'],
+            pin_memory=(args.device == 'cuda'),
+        )
+        print(f"DANN domain loader: {len(dann_loader)} batches from {args.dann_test_dir}")
+
+    # Create model — branch on sequence_length
     print("\nCreating model...")
-    backbone = config['model'].get('backbone', 'resnet18')
-    model = DirectPoseCNN(
-        num_input_channels=config['model']['num_input_channels'],
-        dropout=config['model']['dropout'],
-        pretrained_backbone=config['model']['pretrained_backbone'],
-        backbone=backbone
-    )
+    backbone = config['model'].get('backbone', 'resnet50')
+    seq_len = config['model']['sequence_length']
+    if seq_len > 1:
+        model = DomainAdaptivePoseNet(
+            num_input_channels=config['model']['num_input_channels'],
+            backbone=backbone,
+            dropout=config['model']['dropout'],
+            pretrained_backbone=config['model']['pretrained_backbone'],
+            grl_alpha=0.0,
+        )
+        model_name = f"DomainAdaptivePoseNet (GRU, seq={seq_len}, backbone={backbone})"
+    else:
+        model = DirectPoseCNN(
+            num_input_channels=config['model']['num_input_channels'],
+            dropout=config['model']['dropout'],
+            pretrained_backbone=config['model']['pretrained_backbone'],
+            backbone=backbone,
+        )
+        model_name = f"DirectPoseCNN (backbone={backbone})"
     model = model.to(device)
     num_params = count_parameters(model)
-    print(f"Model: DirectPoseCNN with {backbone} backbone")
+    print(f"Model: {model_name}")
     print(f"Model parameters: {num_params:,}")
     
     # Create loss
@@ -388,12 +464,24 @@ def main():
     print(f"\nStarting training for {config['training']['num_epochs']} epochs...")
     epochs_without_improvement = 0
     
-    for epoch in range(start_epoch, config['training']['num_epochs']):
-        print(f"\nEpoch {epoch+1}/{config['training']['num_epochs']}")
-        
+    total_epochs = config['training']['num_epochs']
+    for epoch in range(start_epoch, total_epochs):
+        print(f"\nEpoch {epoch+1}/{total_epochs}")
+
+        # Ramp GRL alpha (DANN schedule: 0 → 1 over all epochs)
+        lambda_domain = 0.0
+        if dann_loader is not None and hasattr(model, 'set_grl_alpha'):
+            alpha = compute_grl_alpha(epoch, total_epochs)
+            model.set_grl_alpha(alpha)
+            lambda_domain = alpha
+            print(f"  GRL alpha: {alpha:.4f}, lambda_domain: {lambda_domain:.4f}")
+
         # Train
-        train_metrics = train_epoch(model, train_loader, criterion, optimizer, device, epoch, writer, scaler)
-        
+        train_metrics = train_epoch(
+            model, train_loader, criterion, optimizer, device, epoch, writer, scaler,
+            dann_loader=dann_loader, lambda_domain=lambda_domain,
+        )
+
         # Validate
         val_metrics = validate(model, val_loader, criterion, device)
         
