@@ -110,19 +110,15 @@ class SPADESVoxelDataset(Dataset):
         Get a sequence of precomputed voxel grids and poses.
         """
         seq_info = self.sequences[idx]
-        # Use the correct preprocessed directory
         preprocessed_path = os.path.join(self.preprocessed_dir, f"{seq_info['seq_id']}_voxels.h5")
         start_idx = seq_info['start_idx']
         end_idx = start_idx + self.sequence_length
         import h5py
         with h5py.File(preprocessed_path, 'r') as f:
-            # Load precomputed data directly from disk
             voxels = f['voxels'][start_idx:end_idx]
             poses = f['poses'][start_idx:end_idx]
-        # Apply transforms if any
         if self.transform:
             voxels, poses = self.transform(voxels, poses)
-        # Convert to torch tensors
         voxels_tensor = torch.from_numpy(voxels).float()
         poses_tensor = torch.from_numpy(poses).float()
         return voxels_tensor, poses_tensor
