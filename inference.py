@@ -15,6 +15,7 @@ from tqdm import tqdm
 from load_h5 import load_h5_data
 from src.data.event_representations import SignedVoxelGridGenerator, ThreeChannelEventFrame
 from src.models.cnn_lstm_voxel import DirectPoseCNN
+from src.models.domain_adaptive_pose_net import DomainAdaptivePoseNet
 
 
 def parse_args():
@@ -49,7 +50,8 @@ def predict_frame_by_frame(
     timestamps: np.ndarray,
     event_generator,
     device: torch.device,
-    timestamp_scale: float
+    timestamp_scale: float,
+    is_dann: bool = False,
 ) -> np.ndarray:
     """
     Predict poses frame-by-frame (Direct CNN, no temporal model).
@@ -78,8 +80,9 @@ def predict_frame_by_frame(
             # Add batch dimension: (C, H, W) → (1, C, H, W)
             frame_tensor = torch.from_numpy(event_frame).float().unsqueeze(0).to(device)
             
-            # Predict single pose
-            pred_trans, pred_rot = model(frame_tensor)
+            # Predict single pose (DomainAdaptivePoseNet needs seq dim; returns 3-tuple)
+            out = model(frame_tensor.unsqueeze(1)) if is_dann else model(frame_tensor)
+            pred_trans, pred_rot = out[0], out[1]
             
             # Concatenate: (1, 3) + (1, 4) → (1, 7)
             pose = torch.cat([pred_trans, pred_rot], dim=-1)
@@ -148,9 +151,10 @@ def predict_sequence(
             voxels = np.stack(voxel_list, axis=0)  # (seq_len, num_bins, H, W)
             voxels = torch.from_numpy(voxels).float().unsqueeze(0).to(device)  # (1, seq_len, num_bins, H, W)
             
-            # Predict
-            pred_translation, pred_rotation = model(voxels)
-            
+            # Predict (handle both 2-tuple DirectPoseCNN and 3-tuple DomainAdaptivePoseNet)
+            out = model(voxels)
+            pred_translation, pred_rotation = out[0], out[1]
+
             # Concatenate
             pred_poses = torch.cat([pred_translation, pred_rotation], dim=-1)  # (1, seq_len, 7)
             pred_poses = pred_poses.squeeze(0).cpu().numpy()  # (seq_len, 7)
@@ -177,7 +181,8 @@ def predict_sequence(
                 voxels = np.stack(voxel_list, axis=0)
                 voxels = torch.from_numpy(voxels).float().unsqueeze(0).to(device)
                 
-                pred_translation, pred_rotation = model(voxels)
+                out = model(voxels)
+                pred_translation, pred_rotation = out[0], out[1]
                 pred_poses = torch.cat([pred_translation, pred_rotation], dim=-1)
                 pred_poses = pred_poses.squeeze(0).cpu().numpy()
                 
@@ -240,22 +245,34 @@ def main():
     
     config = checkpoint.get('config', {})
     
-    # Create model (DirectPoseCNN for 3-channel, fallback to old model structure if needed)
     num_input_channels = config.get('model', {}).get('num_input_channels', 3)
     backbone = config.get('model', {}).get('backbone', 'resnet18')
-    
-    model = DirectPoseCNN(
-        num_input_channels=num_input_channels,
-        dropout=config.get('model', {}).get('dropout', 0.2),
-        pretrained_backbone=False,  # Not needed for inference
-        backbone=backbone
-    )
-    
+
+    # Auto-detect model type from checkpoint state dict
+    is_dann = any(k.startswith('gru.') for k in checkpoint['model_state_dict'].keys())
+
+    if is_dann:
+        model = DomainAdaptivePoseNet(
+            num_input_channels=num_input_channels,
+            backbone=backbone,
+            dropout=config.get('model', {}).get('dropout', 0.2),
+            pretrained_backbone=False,
+            grl_alpha=0.0,
+        )
+    else:
+        model = DirectPoseCNN(
+            num_input_channels=num_input_channels,
+            dropout=config.get('model', {}).get('dropout', 0.2),
+            pretrained_backbone=False,
+            backbone=backbone,
+        )
+
     model.load_state_dict(checkpoint['model_state_dict'])
     model = model.to(device)
     model.eval()
-    
-    print(f"Model loaded successfully ({backbone} backbone)")
+
+    model_type = "DomainAdaptivePoseNet" if is_dann else "DirectPoseCNN"
+    print(f"Model loaded successfully ({model_type}, {backbone} backbone)")
     
     # Create event frame generator based on num_bins
     num_bins = config.get('data', {}).get('num_bins', 3)
@@ -332,7 +349,8 @@ def main():
         if num_bins == 3:
             predictions = predict_frame_by_frame(
                 model, events, timestamps,
-                event_generator, device, args.test_timestamp_scale
+                event_generator, device, args.test_timestamp_scale,
+                is_dann=is_dann,
             )
         else:
             # Fallback to sequence prediction for compatibility
