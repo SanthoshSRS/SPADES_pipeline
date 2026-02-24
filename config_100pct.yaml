@@ -16,7 +16,7 @@ data:
   
 model:
   num_input_channels: 3  # 3-channel exponential decay
-  sequence_length: 1  # Frame-by-frame prediction (no temporal model)
+  sequence_length: 10  # CNN+GRU temporal model (1 second at 10 Hz)
   dropout: 0.2
   pretrained_backbone: true
   backbone: "resnet50"  # "resnet18" for faster training, "resnet50" for better accuracy

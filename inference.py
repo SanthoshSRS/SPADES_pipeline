@@ -345,18 +345,18 @@ def main():
         
         print(f"\n{seq_id}: {len(timestamps)} poses, {len(events['t'])} events")
         
-        # Run inference (frame-by-frame for 3-channel, or sequence for voxel)
-        if num_bins == 3:
+        # Run inference — use predict_sequence for temporal models (seq_len > 1)
+        seq_len_ckpt = config.get('model', {}).get('sequence_length', 1)
+        if seq_len_ckpt == 1:
             predictions = predict_frame_by_frame(
                 model, events, timestamps,
                 event_generator, device, args.test_timestamp_scale,
                 is_dann=is_dann,
             )
         else:
-            # Fallback to sequence prediction for compatibility
             predictions = predict_sequence(
                 model, events, timestamps,
-                event_generator, args.sequence_length, args.stride,
+                event_generator, seq_len_ckpt, args.stride,
                 device, args.test_timestamp_scale
             )
         
