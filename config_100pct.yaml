@@ -26,7 +26,7 @@ loss:
   lambda_rotation: 10.0  # balance rotation vs translation gradient magnitudes
   
 training:
-  batch_size: 16         # 64 OOMs on A100 at 720x1280 with ResNet-50
+  batch_size: 8          # seq_len=10 OOMs at 16; halved to 8
   num_epochs: 100
   learning_rate: 0.000025  # linear scale with batch: 64->16, /4 from 1e-4
   weight_decay: 0.00001  
