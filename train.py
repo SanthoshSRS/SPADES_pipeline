@@ -373,8 +373,6 @@ def main():
         if not args.dann_test_dir:
             raise ValueError("--dann requires --dann-test-dir pointing to preprocessed real test voxels")
         seq_len = config['model']['sequence_length']
-        if seq_len < 2:
-            raise ValueError("--dann requires sequence_length >= 2 in config (GRU model)")
         dann_dataset = DomainVoxelDataset(
             preprocessed_dir=args.dann_test_dir,
             sequence_length=seq_len,
@@ -392,7 +390,7 @@ def main():
     print("\nCreating model...")
     backbone = config['model'].get('backbone', 'resnet50')
     seq_len = config['model']['sequence_length']
-    if seq_len > 1:
+    if seq_len > 1 or args.dann:
         model = DomainAdaptivePoseNet(
             num_input_channels=config['model']['num_input_channels'],
             backbone=backbone,
