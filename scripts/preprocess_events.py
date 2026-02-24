@@ -83,7 +83,14 @@ def process_sequence(args_tuple):
             )
         
         # Get timestamps
-        timestamps = labels['timestamp'].values * config['timestamp_scale']
+        if labels is not None:
+            timestamps = labels['timestamp'].values * config['timestamp_scale']
+        else:
+            # Real test data: no pose labels — step through event stream in fixed windows
+            t_events = events['t'].astype(float) * config['timestamp_scale']
+            t_min = float(t_events[0])
+            t_max = float(t_events[-1])
+            timestamps = np.arange(t_min, t_max - config['window_size_us'], config['window_size_us'])
         num_poses = len(timestamps)
         
         # Generate voxel grids
@@ -111,17 +118,17 @@ def process_sequence(args_tuple):
         
         # Stack voxels
         voxels = np.stack(voxel_list, axis=0)  # (num_valid, num_bins, H, W)
-        
-        # Extract corresponding pose labels
-        pose_data = labels.iloc[valid_indices][['Tx', 'Ty', 'Tz', 'Qw', 'Qx', 'Qy', 'Qz']].values
+
         pose_timestamps = timestamps[valid_indices]
-        
+
         # Save to HDF5 with compression
         with h5py.File(output_path, 'w') as f:
             f.create_dataset('voxels', data=voxels, compression='gzip', compression_opts=4)
-            f.create_dataset('poses', data=pose_data, compression='gzip', compression_opts=4)
             f.create_dataset('timestamps', data=pose_timestamps, compression='gzip', compression_opts=4)
-            f.create_dataset('valid_indices', data=np.array(valid_indices), compression='gzip', compression_opts=4)
+            if labels is not None:
+                pose_data = labels.iloc[valid_indices][['Tx', 'Ty', 'Tz', 'Qw', 'Qx', 'Qy', 'Qz']].values
+                f.create_dataset('poses', data=pose_data, compression='gzip', compression_opts=4)
+                f.create_dataset('valid_indices', data=np.array(valid_indices), compression='gzip', compression_opts=4)
             
             # Store metadata
             f.attrs['seq_id'] = seq_id
