@@ -454,9 +454,12 @@ def main():
         print(f"\nResuming from checkpoint: {args.resume}")
         checkpoint = torch.load(args.resume)
         model.load_state_dict(checkpoint['model_state_dict'])
-        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-        start_epoch = checkpoint['epoch'] + 1
-        best_val_loss = checkpoint['best_val_loss']
+        if 'optimizer_state_dict' in checkpoint:
+            optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        else:
+            print("  Warning: optimizer state not in checkpoint, starting optimizer fresh")
+        start_epoch = checkpoint.get('epoch', -1) + 1
+        best_val_loss = checkpoint.get('best_val_loss', float('inf'))
     
     # Training loop
     print(f"\nStarting training for {config['training']['num_epochs']} epochs...")
