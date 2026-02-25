@@ -127,77 +127,78 @@ def predict_sequence(
         predictions: Array of poses (num_timestamps, 7) [Tx, Ty, Tz, Qw, Qx, Qy, Qz]
     """
     model.eval()
-    
+
     num_timestamps = len(timestamps)
     predictions = np.zeros((num_timestamps, 7), dtype=np.float32)
-    counts = np.zeros(num_timestamps, dtype=np.float32)  # For averaging overlapping predictions
-    
-    # Generate sliding windows
+    counts = np.zeros(num_timestamps, dtype=np.float32)
+
+    # Sliding window — model outputs one pose per window (last GRU timestep only).
+    # Store prediction only at the last frame index of each window so every
+    # frame gets its own unique GRU-informed prediction (use stride=1).
     with torch.no_grad():
         for start_idx in range(0, num_timestamps - sequence_length + 1, stride):
             end_idx = start_idx + sequence_length
-            
-            # Generate voxel grids for this window
+            last_idx = end_idx - 1  # prediction is for this frame only
+
             window_timestamps = timestamps[start_idx:end_idx] * timestamp_scale
             voxel_list = []
-            
             for ts in window_timestamps:
                 t_start = ts
                 t_end = t_start + voxel_generator.window_size_us
                 voxel = voxel_generator.generate(events, t_start, t_end)
                 voxel_list.append(voxel)
-            
-            # Stack and add batch dimension
-            voxels = np.stack(voxel_list, axis=0)  # (seq_len, num_bins, H, W)
-            voxels = torch.from_numpy(voxels).float().unsqueeze(0).to(device)  # (1, seq_len, num_bins, H, W)
-            
-            # Predict (handle both 2-tuple DirectPoseCNN and 3-tuple DomainAdaptivePoseNet)
+
+            voxels = np.stack(voxel_list, axis=0)  # (seq_len, C, H, W)
+            voxels = torch.from_numpy(voxels).float().unsqueeze(0).to(device)  # (1, seq_len, C, H, W)
+
             out = model(voxels)
             pred_translation, pred_rotation = out[0], out[1]
+            pred_poses = torch.cat([pred_translation, pred_rotation], dim=-1)
+            pred_poses = pred_poses.squeeze(0).cpu().numpy()  # (7,)
 
-            # Concatenate
-            pred_poses = torch.cat([pred_translation, pred_rotation], dim=-1)  # (1, seq_len, 7)
-            pred_poses = pred_poses.squeeze(0).cpu().numpy()  # (seq_len, 7)
-            
-            # Accumulate predictions with averaging for overlap
-            predictions[start_idx:end_idx] += pred_poses
-            counts[start_idx:end_idx] += 1.0
-    
-    # Handle remaining frames at the end (if sequence_length doesn't divide evenly)
-    if num_timestamps > sequence_length:
+            # Store only at the last frame; average if multiple windows land here
+            predictions[last_idx] += pred_poses
+            counts[last_idx] += 1.0
+
+    # Ensure the very last frame is covered when stride doesn't divide evenly
+    if num_timestamps > sequence_length and counts[num_timestamps - 1] == 0:
         last_start_idx = num_timestamps - sequence_length
-        if counts[last_start_idx] == 0:
-            # Predict for last window
-            window_timestamps = timestamps[last_start_idx:] * timestamp_scale
-            voxel_list = []
-            
-            with torch.no_grad():
-                for ts in window_timestamps:
-                    t_start = ts
-                    t_end = t_start + voxel_generator.window_size_us
-                    voxel = voxel_generator.generate(events, t_start, t_end)
-                    voxel_list.append(voxel)
-                
-                voxels = np.stack(voxel_list, axis=0)
-                voxels = torch.from_numpy(voxels).float().unsqueeze(0).to(device)
-                
-                out = model(voxels)
-                pred_translation, pred_rotation = out[0], out[1]
-                pred_poses = torch.cat([pred_translation, pred_rotation], dim=-1)
-                pred_poses = pred_poses.squeeze(0).cpu().numpy()
-                
-                predictions[last_start_idx:] += pred_poses
-                counts[last_start_idx:] += 1.0
-    
-    # Average overlapping predictions
-    counts = np.maximum(counts, 1.0)  # Avoid division by zero
-    predictions = predictions / counts[:, np.newaxis]
-    
+        window_timestamps = timestamps[last_start_idx:] * timestamp_scale
+        voxel_list = []
+        with torch.no_grad():
+            for ts in window_timestamps:
+                t_start = ts
+                t_end = t_start + voxel_generator.window_size_us
+                voxel = voxel_generator.generate(events, t_start, t_end)
+                voxel_list.append(voxel)
+            voxels = np.stack(voxel_list, axis=0)
+            voxels = torch.from_numpy(voxels).float().unsqueeze(0).to(device)
+            out = model(voxels)
+            pred_translation, pred_rotation = out[0], out[1]
+            pred_poses = torch.cat([pred_translation, pred_rotation], dim=-1)
+            pred_poses = pred_poses.squeeze(0).cpu().numpy()
+            predictions[num_timestamps - 1] += pred_poses
+            counts[num_timestamps - 1] += 1.0
+
+    # Average frames that received multiple predictions
+    valid = counts > 0
+    predictions[valid] = predictions[valid] / counts[valid, np.newaxis]
+
+    # Backward-fill frames before the first valid prediction (frames 0..seq_len-2)
+    first_valid = int(np.argmax(valid)) if valid.any() else 0
+    if first_valid > 0:
+        predictions[:first_valid] = predictions[first_valid]
+
+    # Forward-fill any remaining gaps (when stride > 1 leaves holes)
+    for i in range(1, num_timestamps):
+        if not valid[i]:
+            predictions[i] = predictions[i - 1]
+
     # Renormalize quaternions
     quaternions = predictions[:, 3:]
     quaternions = quaternions / (np.linalg.norm(quaternions, axis=1, keepdims=True) + 1e-8)
     predictions[:, 3:] = quaternions
-    
+
     return predictions
 
 
