@@ -86,7 +86,7 @@ class KeypointDataset(Dataset):
                 'vis':   visibility,                 # (N, 8) bool
             }
 
-            with h5py.File(voxel_path, 'r') as f:
+            with h5py.File(voxel_path, 'r', locking=False) as f:
                 n_voxels = f['voxels'].shape[0]
 
             n = min(visibility.shape[0], n_voxels)
@@ -102,7 +102,7 @@ class KeypointDataset(Dataset):
 
         # ── Load voxel (open/close per call — same as SPADESVoxelDataset) ──────
         voxel_path = os.path.join(self.preprocessed_dir, f"{seq_id}_voxels.h5")
-        with h5py.File(voxel_path, 'r') as f:
+        with h5py.File(voxel_path, 'r', locking=False) as f:
             voxel = f['voxels'][frame_idx]    # (C, H, W)
 
         if self.transform is not None:
