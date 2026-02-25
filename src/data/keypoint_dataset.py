@@ -54,10 +54,10 @@ class KeypointDataset(Dataset):
         # __getitem__ never opens a file — eliminates IO bottleneck with many workers
         self._kp_cache: dict = {}   # seq_id → {'kp_2d': (N,8,2), 'vis': (N,8)}
 
-        # H5 file handles — lazily opened on first access per worker process.
-        # Initialized to None so the dataset is safely picklable for DataLoader
-        # workers (file handles cannot be pickled; each worker opens its own).
-        self._h5_handles: Optional[dict] = None
+        # H5 file handles — pre-opened during _build_index (num_workers=0 only).
+        # All 270 files are opened once up front so __getitem__ never blocks
+        # on a cold NFS open during training.
+        self._h5_handles: dict = {}
 
         self._build_index(sequence_ids)
 
@@ -89,8 +89,9 @@ class KeypointDataset(Dataset):
                 'vis':   visibility,                 # (N, 8) bool
             }
 
-            with h5py.File(voxel_path, 'r') as f:
-                n_voxels = f['voxels'].shape[0]
+            # Pre-open h5 handle so NFS cold-opens happen at init, not mid-epoch
+            self._h5_handles[seq_id] = h5py.File(voxel_path, 'r')
+            n_voxels = self._h5_handles[seq_id]['voxels'].shape[0]
 
             n = min(visibility.shape[0], n_voxels)
             for i in range(n):
@@ -103,12 +104,7 @@ class KeypointDataset(Dataset):
     def __getitem__(self, idx: int):
         seq_id, frame_idx = self.samples[idx]
 
-        # ── Load voxel (keep H5 handles open across calls) ───────────────────
-        if self._h5_handles is None:
-            self._h5_handles = {}
-        if seq_id not in self._h5_handles:
-            voxel_path = os.path.join(self.preprocessed_dir, f"{seq_id}_voxels.h5")
-            self._h5_handles[seq_id] = h5py.File(voxel_path, 'r')
+        # ── Load voxel (handle pre-opened in _build_index) ───────────────────
         voxel = self._h5_handles[seq_id]['voxels'][frame_idx]   # (C, H, W)
 
         if self.transform is not None:
