@@ -81,8 +81,10 @@ def mean_pixel_error(pred: torch.Tensor, gt: torch.Tensor, vis: torch.Tensor) ->
 def train_epoch(model, loader, optimizer, device, scaler=None):
     model.train()
     total_loss, total_px, n = 0.0, 0.0, 0
-
-    for voxels, kp_gt, vis in loader:
+    print("  Fetching first batch...", flush=True)
+    for batch_idx, (voxels, kp_gt, vis) in enumerate(loader):
+        if batch_idx % 200 == 0:
+            print(f"  batch {batch_idx}/{len(loader)}", flush=True)
         voxels = voxels.to(device)       # (B, C, H, W)
         kp_gt  = kp_gt.to(device)        # (B, 8, 2)  normalized
         vis    = vis.to(device)           # (B, 8)     bool
@@ -189,14 +191,15 @@ def main():
     # a fork(), so workers must start fresh. Lazy handle init in __getitem__
     # means each worker opens its own h5 connections on first access.
     mp_ctx = 'spawn' if args.num_workers > 0 else None
+    pin = args.num_workers > 0   # pin_memory requires workers; skip for num_workers=0
     train_loader = DataLoader(
         train_ds, batch_size=args.batch_size, shuffle=True,
-        num_workers=args.num_workers, pin_memory=True, drop_last=True,
+        num_workers=args.num_workers, pin_memory=pin, drop_last=True,
         multiprocessing_context=mp_ctx, persistent_workers=(args.num_workers > 0),
     )
     val_loader = DataLoader(
         val_ds, batch_size=args.batch_size, shuffle=False,
-        num_workers=args.num_workers, pin_memory=True,
+        num_workers=args.num_workers, pin_memory=pin,
         multiprocessing_context=mp_ctx, persistent_workers=(args.num_workers > 0),
     )
 
@@ -236,7 +239,9 @@ def main():
     print()
 
     # ── Training loop ─────────────────────────────────────────────────────────
+    print("Starting training loop...", flush=True)
     for epoch in range(start_epoch, args.epochs):
+        print(f"Epoch {epoch+1} starting...", flush=True)
         train_loss, train_px = train_epoch(model, train_loader, optimizer, device, scaler)
         val_loss,   val_px   = val_epoch(model, val_loader, device)
 
