@@ -204,7 +204,7 @@ def main():
     optimizer = torch.optim.Adam(
         model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode='min', factor=0.5, patience=5, verbose=True)
+        optimizer, mode='min', factor=0.5, patience=5)
     scaler = (torch.cuda.amp.GradScaler()
               if (args.amp and device.type == 'cuda') else None)
 
