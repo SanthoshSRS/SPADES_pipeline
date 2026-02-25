@@ -44,7 +44,7 @@ def load_dense_frame(h5_path: str, frame_idx: int, timestamp_scale: float = 100.
     t_half   = 5_000_000   # ±5 seconds
 
     with h5py.File(h5_path, 'r') as f:
-        ts_events = f['events']['ts'][()].astype(np.float64)
+        ts_events = f['events']['ts'][()].astype(np.float64) * timestamp_scale  # → µs
 
     mask = (ts_events >= t_center - t_half) & (ts_events <= t_center + t_half)
 
