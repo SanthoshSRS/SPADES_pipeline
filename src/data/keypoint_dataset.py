@@ -49,6 +49,11 @@ class KeypointDataset(Dataset):
 
         # List of (seq_id, frame_idx) tuples
         self.samples: List[Tuple[str, int]] = []
+
+        # Cache all keypoint arrays in memory (~11 MB for 300 sequences) so
+        # __getitem__ never opens a file — eliminates IO bottleneck with many workers
+        self._kp_cache: dict = {}   # seq_id → {'kp_2d': (N,8,2), 'vis': (N,8)}
+
         self._build_index(sequence_ids)
 
         print(
@@ -70,9 +75,14 @@ class KeypointDataset(Dataset):
                       f"scripts/generate_keypoint_labels.py first, skipping")
                 continue
 
-            # Load visibility mask to filter out frames with too few visible keypoints
             kp_data    = np.load(kp_path)
             visibility = kp_data['visibility']   # (N, 8) bool
+
+            # Cache so __getitem__ never re-reads the npz
+            self._kp_cache[seq_id] = {
+                'kp_2d': kp_data['keypoints_2d'],   # (N, 8, 2) float32
+                'vis':   visibility,                 # (N, 8) bool
+            }
 
             with h5py.File(voxel_path, 'r') as f:
                 n_voxels = f['voxels'].shape[0]
@@ -96,11 +106,10 @@ class KeypointDataset(Dataset):
         if self.transform is not None:
             voxel = self.transform(voxel)
 
-        # ── Load keypoints ───────────────────────────────────────────────────
-        kp_path = os.path.join(self.keypoint_label_dir, f"{seq_id}_keypoints.npz")
-        kp_data = np.load(kp_path)
-        kp_2d   = kp_data['keypoints_2d'][frame_idx]   # (8, 2) pixels
-        vis     = kp_data['visibility'][frame_idx]      # (8,)   bool
+        # ── Load keypoints from in-memory cache ─────────────────────────────
+        cache = self._kp_cache[seq_id]
+        kp_2d = cache['kp_2d'][frame_idx]   # (8, 2) pixels
+        vis   = cache['vis'][frame_idx]      # (8,)   bool
 
         # Normalize keypoints to [0, 1]
         kp_norm = kp_2d / np.array([self.IMG_W, self.IMG_H], dtype=np.float32)
