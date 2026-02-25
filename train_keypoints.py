@@ -115,10 +115,13 @@ def train_epoch(model, loader, optimizer, device, scaler=None):
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
 
+        if _dbg: print(f"  [dbg] batch {batch_idx}: calling mean_pixel_error...", flush=True)
         with torch.no_grad():
             px = mean_pixel_error(kp_pred.detach(), kp_gt, vis)
+        if _dbg: print(f"  [dbg] batch {batch_idx}: px={px:.1f}  calling loss.item()...", flush=True)
 
         total_loss += loss.item()
+        if _dbg: print(f"  [dbg] batch {batch_idx}: loss.item() done  fetching next batch...", flush=True)
         total_px   += px
         n          += 1
 
