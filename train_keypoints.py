@@ -83,27 +83,35 @@ def train_epoch(model, loader, optimizer, device, scaler=None):
     total_loss, total_px, n = 0.0, 0.0, 0
     print("  Fetching first batch...", flush=True)
     for batch_idx, (voxels, kp_gt, vis) in enumerate(loader):
-        if batch_idx % 200 == 0:
-            print(f"  batch {batch_idx}/{len(loader)}", flush=True)
-        voxels = voxels.to(device)       # (B, C, H, W)
-        kp_gt  = kp_gt.to(device)        # (B, 8, 2)  normalized
-        vis    = vis.to(device)           # (B, 8)     bool
+        _dbg = batch_idx < 3
+        if _dbg: print(f"  [dbg] batch {batch_idx}: data loaded shape={voxels.shape}", flush=True)
+
+        voxels = voxels.to(device)
+        kp_gt  = kp_gt.to(device)
+        vis    = vis.to(device)
+        if _dbg: print(f"  [dbg] batch {batch_idx}: .to(device) done", flush=True)
 
         optimizer.zero_grad(set_to_none=True)
 
         if scaler is not None:
             with torch.autocast(device_type='cuda', dtype=torch.float16):
                 kp_pred = model(voxels).view(-1, 8, 2)
+                if _dbg: print(f"  [dbg] batch {batch_idx}: forward done", flush=True)
                 loss = masked_l1_loss(kp_pred, kp_gt, vis)
+                if _dbg: print(f"  [dbg] batch {batch_idx}: loss={loss.item():.4f}", flush=True)
             scaler.scale(loss).backward()
+            if _dbg: print(f"  [dbg] batch {batch_idx}: backward done", flush=True)
             scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             scaler.step(optimizer)
             scaler.update()
+            if _dbg: print(f"  [dbg] batch {batch_idx}: optimizer step done", flush=True)
         else:
             kp_pred = model(voxels).view(-1, 8, 2)
+            if _dbg: print(f"  [dbg] batch {batch_idx}: forward done", flush=True)
             loss = masked_l1_loss(kp_pred, kp_gt, vis)
             loss.backward()
+            if _dbg: print(f"  [dbg] batch {batch_idx}: backward done", flush=True)
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
 
@@ -113,6 +121,9 @@ def train_epoch(model, loader, optimizer, device, scaler=None):
         total_loss += loss.item()
         total_px   += px
         n          += 1
+
+        if batch_idx % 200 == 0 and batch_idx > 0:
+            print(f"  batch {batch_idx}/{len(loader)}", flush=True)
 
     return total_loss / max(n, 1), total_px / max(n, 1)
 
