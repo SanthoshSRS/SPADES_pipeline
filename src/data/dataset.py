@@ -133,24 +133,30 @@ def select_stratified_subset(
     """
     np.random.seed(seed)
     random.seed(seed)
-    
+
+    # For 100%, skip sampling and return all sequences
+    if subset_pct >= 1.0:
+        sequence_ids = [f"RT{i:03d}" for i in range(total_sequences)]
+        print(f"Selected all {len(sequence_ids)} sequences (100%)")
+        return sequence_ids
+
     n_subset = int(total_sequences * subset_pct)
-    
+
     # Stratify by range (based on sequence numbering assumption)
     # RT000-RT099: close range
-    # RT100-RT199: mid range  
+    # RT100-RT199: mid range
     # RT200-RT299: far range
-    
+
     close_range = list(range(0, 100))
     mid_range = list(range(100, 200))
     far_range = list(range(200, 300))
-    
+
     # Calculate proportional sampling
     # For 25%: 20 close, 35 mid, 20 far = 75 total
     n_close = int(n_subset * 0.27)  # ~27% close
     n_mid = int(n_subset * 0.47)    # ~47% mid
     n_far = n_subset - n_close - n_mid  # Remainder for far
-    
+
     # Sample from each range
     selected_close = np.random.choice(close_range, n_close, replace=False)
     selected_mid = np.random.choice(mid_range, n_mid, replace=False)
