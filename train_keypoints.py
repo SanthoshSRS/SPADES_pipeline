@@ -201,20 +201,15 @@ def main():
         min_visible        = args.min_visible,
     )
 
-    # Use 'spawn' multiprocessing context: h5py file handles can't survive
-    # a fork(), so workers must start fresh. Lazy handle init in __getitem__
-    # means each worker opens its own h5 connections on first access.
-    mp_ctx = 'spawn' if args.num_workers > 0 else None
-    pin = args.num_workers > 0   # pin_memory requires workers; skip for num_workers=0
+    # Use fork (default) + open/close h5 per __getitem__ — same pattern as
+    # SPADESVoxelDataset which works reliably on this server with num_workers=8.
     train_loader = DataLoader(
         train_ds, batch_size=args.batch_size, shuffle=True,
-        num_workers=args.num_workers, pin_memory=pin, drop_last=True,
-        multiprocessing_context=mp_ctx, persistent_workers=(args.num_workers > 0),
+        num_workers=args.num_workers, pin_memory=True, drop_last=True,
     )
     val_loader = DataLoader(
         val_ds, batch_size=args.batch_size, shuffle=False,
-        num_workers=args.num_workers, pin_memory=pin,
-        multiprocessing_context=mp_ctx, persistent_workers=(args.num_workers > 0),
+        num_workers=args.num_workers, pin_memory=True,
     )
 
     # ── Model ─────────────────────────────────────────────────────────────────

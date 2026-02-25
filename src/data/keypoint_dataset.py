@@ -51,13 +51,10 @@ class KeypointDataset(Dataset):
         self.samples: List[Tuple[str, int]] = []
 
         # Cache all keypoint arrays in memory (~11 MB for 300 sequences) so
-        # __getitem__ never opens a file — eliminates IO bottleneck with many workers
+        # __getitem__ never opens the npz file — only h5 voxel files are opened
+        # fresh per __getitem__ call (same pattern as SPADESVoxelDataset which
+        # works reliably with num_workers=8 fork on this server).
         self._kp_cache: dict = {}   # seq_id → {'kp_2d': (N,8,2), 'vis': (N,8)}
-
-        # H5 file handles — pre-opened during _build_index (num_workers=0 only).
-        # All 270 files are opened once up front so __getitem__ never blocks
-        # on a cold NFS open during training.
-        self._h5_handles: dict = {}
 
         self._build_index(sequence_ids)
 
@@ -89,9 +86,8 @@ class KeypointDataset(Dataset):
                 'vis':   visibility,                 # (N, 8) bool
             }
 
-            # Pre-open h5 handle so NFS cold-opens happen at init, not mid-epoch
-            self._h5_handles[seq_id] = h5py.File(voxel_path, 'r')
-            n_voxels = self._h5_handles[seq_id]['voxels'].shape[0]
+            with h5py.File(voxel_path, 'r') as f:
+                n_voxels = f['voxels'].shape[0]
 
             n = min(visibility.shape[0], n_voxels)
             for i in range(n):
@@ -104,8 +100,10 @@ class KeypointDataset(Dataset):
     def __getitem__(self, idx: int):
         seq_id, frame_idx = self.samples[idx]
 
-        # ── Load voxel (handle pre-opened in _build_index) ───────────────────
-        voxel = self._h5_handles[seq_id]['voxels'][frame_idx]   # (C, H, W)
+        # ── Load voxel (open/close per call — same as SPADESVoxelDataset) ──────
+        voxel_path = os.path.join(self.preprocessed_dir, f"{seq_id}_voxels.h5")
+        with h5py.File(voxel_path, 'r') as f:
+            voxel = f['voxels'][frame_idx]    # (C, H, W)
 
         if self.transform is not None:
             voxel = self.transform(voxel)
