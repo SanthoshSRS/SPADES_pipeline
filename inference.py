@@ -12,10 +12,14 @@ import pandas as pd
 from glob import glob
 from tqdm import tqdm
 
+import cv2
+from scipy.spatial.transform import Rotation as ScipyRotation
+
 from load_h5 import load_h5_data
 from src.data.event_representations import SignedVoxelGridGenerator, ThreeChannelEventFrame
 from src.models.cnn_lstm_voxel import DirectPoseCNN
 from src.models.domain_adaptive_pose_net import DomainAdaptivePoseNet
+from src.models.keypoint_net import KeypointPoseNet
 
 
 def parse_args():
@@ -96,6 +100,111 @@ def predict_frame_by_frame(
     quaternions /= np.linalg.norm(quaternions, axis=1, keepdims=True) + 1e-8
     predictions[:, 3:] = quaternions
     
+    return predictions
+
+
+def predict_pnp(
+    model: torch.nn.Module,
+    events: dict,
+    timestamps: np.ndarray,
+    event_generator,
+    device: torch.device,
+    timestamp_scale: float,
+    keypoints_3d: np.ndarray,
+) -> np.ndarray:
+    """
+    Predict poses using CNN keypoint regression + PnP solver.
+
+    The model predicts 8 × (u,v) normalized [0,1] for each event frame.
+    cv2.solvePnP uses the known 3D body-frame keypoints and camera intrinsics
+    to solve for 6-DoF pose geometrically.
+
+    Args:
+        model:          KeypointPoseNet
+        events:         Event dictionary from load_h5_data
+        timestamps:     Array of pose timestamps (in raw units before scale)
+        event_generator: ThreeChannelEventFrame instance
+        device:         Inference device
+        timestamp_scale: Multiply timestamps by this before generating event frames
+        keypoints_3d:   (8, 3) float64 — 3D keypoints in satellite body frame (meters)
+
+    Returns:
+        predictions: (num_timestamps, 7) [Tx, Ty, Tz, Qw, Qx, Qy, Qz]
+    """
+    # Camera intrinsics (from SPADES/camera.json)
+    K = np.array([
+        [1258.6057531097028, 0.0, 640.0],
+        [0.0, 1258.6057531097028, 360.0],
+        [0.0, 0.0, 1.0],
+    ], dtype=np.float64)
+    dist_coeffs = np.zeros((4, 1), dtype=np.float64)
+
+    kp3d = keypoints_3d.reshape(-1, 1, 3).astype(np.float64)
+
+    model.eval()
+    num_timestamps = len(timestamps)
+    predictions = np.zeros((num_timestamps, 7), dtype=np.float32)
+    # Default fallback pose (identity rotation, 5m depth)
+    predictions[:, 2] = 5.0
+    predictions[:, 3] = 1.0   # Qw = 1
+
+    last_valid_pose = None
+
+    with torch.no_grad():
+        for i, ts in enumerate(tqdm(timestamps * timestamp_scale, desc="Predicting (PnP)")):
+            t_start = ts
+            t_end   = t_start + event_generator.window_size_us
+            frame   = event_generator.generate(events, t_start, t_end)
+
+            frame_t = torch.from_numpy(frame).float().unsqueeze(0).to(device)
+            kp_norm = model(frame_t).cpu().numpy().reshape(8, 2)   # normalized [0,1]
+
+            # Back to pixel coordinates
+            kp_px = kp_norm * np.array([[1280.0, 720.0]])   # (8, 2)
+            kp_px_cv = kp_px.reshape(-1, 1, 2).astype(np.float64)
+
+            # PnP solve
+            ret, rvec, tvec, inliers = cv2.solvePnPRansac(
+                kp3d, kp_px_cv, K, dist_coeffs,
+                iterationsCount=100,
+                reprojectionError=8.0,
+                confidence=0.99,
+                flags=cv2.SOLVEPNP_EPNP,
+            )
+
+            if not ret or inliers is None or len(inliers) < 4:
+                # Fallback: use last valid prediction
+                if last_valid_pose is not None:
+                    predictions[i] = last_valid_pose
+                continue
+
+            # rvec → rotation matrix → quaternion [Qw, Qx, Qy, Qz]
+            R_mat, _ = cv2.Rodrigues(rvec)
+            quat_xyzw = ScipyRotation.from_matrix(R_mat).as_quat()  # [x, y, z, w]
+            quat_wxyz = np.array([quat_xyzw[3], quat_xyzw[0],
+                                  quat_xyzw[1], quat_xyzw[2]], dtype=np.float32)
+
+            pose = np.concatenate([tvec.flatten().astype(np.float32), quat_wxyz])
+            predictions[i] = pose
+            last_valid_pose = pose
+
+    # Forward-fill any remaining fallback frames (where PnP failed)
+    # Find first valid frame and backward-fill from it
+    valid = ~np.all(predictions[:, 3:] == np.array([1.0, 0.0, 0.0, 0.0]), axis=1)
+    valid &= ~(predictions[:, 2] == 5.0)   # not the default placeholder
+    if valid.any():
+        first = int(np.argmax(valid))
+        if first > 0:
+            predictions[:first] = predictions[first]
+        for j in range(1, num_timestamps):
+            if not valid[j]:
+                predictions[j] = predictions[j - 1]
+
+    # Renormalize quaternions
+    quats = predictions[:, 3:]
+    quats /= np.linalg.norm(quats, axis=1, keepdims=True) + 1e-8
+    predictions[:, 3:] = quats
+
     return predictions
 
 
@@ -249,10 +358,19 @@ def main():
     num_input_channels = config.get('model', {}).get('num_input_channels', 3)
     backbone = config.get('model', {}).get('backbone', 'resnet18')
 
-    # Auto-detect model type from checkpoint state dict
-    is_dann = any(k.startswith('gru.') for k in checkpoint['model_state_dict'].keys())
+    # Auto-detect model type from checkpoint state dict keys
+    state_keys  = checkpoint['model_state_dict'].keys()
+    is_keypoint = any(k.startswith('kp_head.') for k in state_keys)
+    is_dann     = (not is_keypoint) and any(k.startswith('gru.') for k in state_keys)
 
-    if is_dann:
+    if is_keypoint:
+        model = KeypointPoseNet(
+            num_input_channels=num_input_channels,
+            dropout=config.get('model', {}).get('dropout', 0.2),
+            pretrained_backbone=False,
+        )
+        model_type = "KeypointPoseNet"
+    elif is_dann:
         model = DomainAdaptivePoseNet(
             num_input_channels=num_input_channels,
             backbone=backbone,
@@ -260,6 +378,7 @@ def main():
             pretrained_backbone=False,
             grl_alpha=0.0,
         )
+        model_type = "DomainAdaptivePoseNet"
     else:
         model = DirectPoseCNN(
             num_input_channels=num_input_channels,
@@ -267,12 +386,12 @@ def main():
             pretrained_backbone=False,
             backbone=backbone,
         )
+        model_type = "DirectPoseCNN"
 
     model.load_state_dict(checkpoint['model_state_dict'])
     model = model.to(device)
     model.eval()
 
-    model_type = "DomainAdaptivePoseNet" if is_dann else "DirectPoseCNN"
     print(f"Model loaded successfully ({model_type}, {backbone} backbone)")
     
     # Create event frame generator based on num_bins
@@ -346,9 +465,21 @@ def main():
         
         print(f"\n{seq_id}: {len(timestamps)} poses, {len(events['t'])} events")
         
-        # Run inference — use predict_sequence for temporal models (seq_len > 1)
+        # Route to correct inference function based on model type
         seq_len_ckpt = config.get('model', {}).get('sequence_length', 1)
-        if seq_len_ckpt == 1:
+        if is_keypoint:
+            keypoints_3d = checkpoint.get('keypoints_3d', None)
+            if keypoints_3d is None:
+                raise RuntimeError(
+                    "KeypointPoseNet checkpoint missing 'keypoints_3d' — "
+                    "retrain with train_keypoints.py (it embeds them automatically)."
+                )
+            predictions = predict_pnp(
+                model, events, timestamps,
+                event_generator, device, args.test_timestamp_scale,
+                keypoints_3d=keypoints_3d,
+            )
+        elif seq_len_ckpt == 1:
             predictions = predict_frame_by_frame(
                 model, events, timestamps,
                 event_generator, device, args.test_timestamp_scale,
