@@ -78,50 +78,38 @@ def mean_pixel_error(pred: torch.Tensor, gt: torch.Tensor, vis: torch.Tensor) ->
 # Train / val loops
 # ─────────────────────────────────────────────────────────────────────────────
 
-def train_epoch(model, loader, optimizer, device, scaler=None):
+def train_epoch(model, loader, optimizer, device, scaler=None, resize_size=None):
     model.train()
     total_loss, total_px, n = 0.0, 0.0, 0
-    print("  Fetching first batch...", flush=True)
     for batch_idx, (voxels, kp_gt, vis) in enumerate(loader):
-        _dbg = batch_idx < 3
-        if _dbg: print(f"  [dbg] batch {batch_idx}: data loaded shape={voxels.shape}", flush=True)
-
-        voxels = voxels.to(device)
-        kp_gt  = kp_gt.to(device)
-        vis    = vis.to(device)
-        if _dbg: print(f"  [dbg] batch {batch_idx}: .to(device) done", flush=True)
+        voxels = voxels.to(device, non_blocking=True)
+        if resize_size is not None:
+            voxels = F.interpolate(voxels, size=resize_size, mode='bilinear', align_corners=False)
+        kp_gt  = kp_gt.to(device, non_blocking=True)
+        vis    = vis.to(device, non_blocking=True)
 
         optimizer.zero_grad(set_to_none=True)
 
         if scaler is not None:
             with torch.autocast(device_type='cuda', dtype=torch.float16):
                 kp_pred = model(voxels).view(-1, 8, 2)
-                if _dbg: print(f"  [dbg] batch {batch_idx}: forward done", flush=True)
                 loss = masked_l1_loss(kp_pred, kp_gt, vis)
-                if _dbg: print(f"  [dbg] batch {batch_idx}: loss={loss.item():.4f}", flush=True)
             scaler.scale(loss).backward()
-            if _dbg: print(f"  [dbg] batch {batch_idx}: backward done", flush=True)
             scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             scaler.step(optimizer)
             scaler.update()
-            if _dbg: print(f"  [dbg] batch {batch_idx}: optimizer step done", flush=True)
         else:
             kp_pred = model(voxels).view(-1, 8, 2)
-            if _dbg: print(f"  [dbg] batch {batch_idx}: forward done", flush=True)
             loss = masked_l1_loss(kp_pred, kp_gt, vis)
             loss.backward()
-            if _dbg: print(f"  [dbg] batch {batch_idx}: backward done", flush=True)
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
 
-        if _dbg: print(f"  [dbg] batch {batch_idx}: calling mean_pixel_error...", flush=True)
         with torch.no_grad():
             px = mean_pixel_error(kp_pred.detach(), kp_gt, vis)
-        if _dbg: print(f"  [dbg] batch {batch_idx}: px={px:.1f}  calling loss.item()...", flush=True)
 
         total_loss += loss.item()
-        if _dbg: print(f"  [dbg] batch {batch_idx}: loss.item() done  fetching next batch...", flush=True)
         total_px   += px
         n          += 1
 
@@ -132,14 +120,16 @@ def train_epoch(model, loader, optimizer, device, scaler=None):
 
 
 @torch.no_grad()
-def val_epoch(model, loader, device):
+def val_epoch(model, loader, device, resize_size=None):
     model.eval()
     total_loss, total_px, n = 0.0, 0.0, 0
 
     for voxels, kp_gt, vis in loader:
-        voxels = voxels.to(device)
-        kp_gt  = kp_gt.to(device)
-        vis    = vis.to(device)
+        voxels = voxels.to(device, non_blocking=True)
+        if resize_size is not None:
+            voxels = F.interpolate(voxels, size=resize_size, mode='bilinear', align_corners=False)
+        kp_gt  = kp_gt.to(device, non_blocking=True)
+        vis    = vis.to(device, non_blocking=True)
 
         kp_pred = model(voxels).view(-1, 8, 2)
         loss    = masked_l1_loss(kp_pred, kp_gt, vis)
@@ -191,28 +181,21 @@ def main():
     all_ids    = select_stratified_subset(total_sequences=300, subset_pct=subset_pct)
     train_ids, val_ids = train_val_split(all_ids, val_ratio=0.1)
 
-    # Resize voxel from 720×1280 → input_size for ~8× faster training.
-    # Keypoint labels are normalized [0,1] so no label transform needed.
+    # Resize is done on the GPU inside train_epoch/val_epoch — workers return
+    # raw 720×1280 voxels (I/O-bound only, no CPU compute in workers).
     in_h, in_w = args.input_size
-    def resize_voxel(voxel):
-        import torch.nn.functional as F
-        t = torch.from_numpy(np.array(voxel, dtype=np.float32)).unsqueeze(0)
-        t = F.interpolate(t, size=(in_h, in_w), mode='bilinear', align_corners=False)
-        return t.squeeze(0).numpy()
 
     train_ds = KeypointDataset(
         preprocessed_dir   = args.preprocessed_dir,
         keypoint_label_dir = args.keypoint_label_dir,
         sequence_ids       = train_ids,
         min_visible        = args.min_visible,
-        transform          = resize_voxel,
     )
     val_ds = KeypointDataset(
         preprocessed_dir   = args.preprocessed_dir,
         keypoint_label_dir = args.keypoint_label_dir,
         sequence_ids       = val_ids,
         min_visible        = args.min_visible,
-        transform          = resize_voxel,
     )
 
     # Use fork (default) + open/close h5 per __getitem__ — same pattern as
@@ -266,8 +249,10 @@ def main():
     print("Starting training loop...", flush=True)
     for epoch in range(start_epoch, args.epochs):
         print(f"Epoch {epoch+1} starting...", flush=True)
-        train_loss, train_px = train_epoch(model, train_loader, optimizer, device, scaler)
-        val_loss,   val_px   = val_epoch(model, val_loader, device)
+        train_loss, train_px = train_epoch(model, train_loader, optimizer, device, scaler,
+                                           resize_size=(in_h, in_w))
+        val_loss,   val_px   = val_epoch(model, val_loader, device,
+                                         resize_size=(in_h, in_w))
 
         scheduler.step(val_loss)
 
