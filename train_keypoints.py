@@ -178,6 +178,9 @@ def main():
     parser.add_argument('--patience',            type=int,   default=10)
     parser.add_argument('--min-visible',         type=int,   default=4,
                         help='Min visible keypoints per frame (default: 4)')
+    parser.add_argument('--input-size',          type=int,   nargs=2,
+                        default=[256, 448], metavar=('H', 'W'),
+                        help='Resize voxel input to H×W before feeding to CNN (default: 256 448)')
     args = parser.parse_args()
 
     device = torch.device(args.device if torch.cuda.is_available() else 'cpu')
@@ -188,17 +191,28 @@ def main():
     all_ids    = select_stratified_subset(total_sequences=300, subset_pct=subset_pct)
     train_ids, val_ids = train_val_split(all_ids, val_ratio=0.1)
 
+    # Resize voxel from 720×1280 → input_size for ~8× faster training.
+    # Keypoint labels are normalized [0,1] so no label transform needed.
+    in_h, in_w = args.input_size
+    def resize_voxel(voxel):
+        import torch.nn.functional as F
+        t = torch.from_numpy(np.array(voxel, dtype=np.float32)).unsqueeze(0)
+        t = F.interpolate(t, size=(in_h, in_w), mode='bilinear', align_corners=False)
+        return t.squeeze(0).numpy()
+
     train_ds = KeypointDataset(
         preprocessed_dir   = args.preprocessed_dir,
         keypoint_label_dir = args.keypoint_label_dir,
         sequence_ids       = train_ids,
         min_visible        = args.min_visible,
+        transform          = resize_voxel,
     )
     val_ds = KeypointDataset(
         preprocessed_dir   = args.preprocessed_dir,
         keypoint_label_dir = args.keypoint_label_dir,
         sequence_ids       = val_ids,
         min_visible        = args.min_visible,
+        transform          = resize_voxel,
     )
 
     # Use fork (default) + open/close h5 per __getitem__ — same pattern as
@@ -243,6 +257,7 @@ def main():
     print(f"\nTraining KeypointPoseNet on {device}")
     print(f"  Params:     {total_params:,}")
     print(f"  Train:      {len(train_ds):,} frames | Val: {len(val_ds):,} frames")
+    print(f"  Input size: {in_h}×{in_w} (resized from 720×1280)")
     print(f"  Batch size: {args.batch_size} | LR: {args.lr} | AMP: {args.amp}")
     print(f"  Checkpoint: {os.path.join(args.checkpoint_dir, args.checkpoint_name)}")
     print()
