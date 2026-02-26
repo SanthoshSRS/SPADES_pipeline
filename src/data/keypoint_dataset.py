@@ -29,6 +29,9 @@ class KeypointDataset(Dataset):
         sequence_ids:       List of sequence IDs to include (e.g. ['RT000', ...])
         min_visible:        Skip frames with fewer visible keypoints than this (default: 4)
         transform:          Optional callable applied to the raw voxel np.ndarray
+        augment:            Optional callable(voxel, kp_2d, vis) -> (voxel, kp_2d, vis)
+                            Applied after transform; receives kp_2d in original pixel space
+                            (1280×720). Only used for the training split — leave None for val.
     """
 
     IMG_W = 1280
@@ -41,11 +44,13 @@ class KeypointDataset(Dataset):
         sequence_ids: List[str],
         min_visible: int = 4,
         transform: Optional[callable] = None,
+        augment: Optional[callable] = None,
     ):
         self.preprocessed_dir   = preprocessed_dir
         self.keypoint_label_dir = keypoint_label_dir
         self.min_visible        = min_visible
         self.transform          = transform
+        self.augment            = augment
 
         # List of (seq_id, frame_idx) tuples
         self.samples: List[Tuple[str, int]] = []
@@ -110,8 +115,12 @@ class KeypointDataset(Dataset):
 
         # ── Load keypoints from in-memory cache ─────────────────────────────
         cache = self._kp_cache[seq_id]
-        kp_2d = cache['kp_2d'][frame_idx]   # (8, 2) pixels
-        vis   = cache['vis'][frame_idx]      # (8,)   bool
+        kp_2d = cache['kp_2d'][frame_idx].copy()   # (8, 2) pixels — copy so augment is safe
+        vis   = cache['vis'][frame_idx].copy()       # (8,)   bool
+
+        # Joint spatial+photometric augmentation (training only)
+        if self.augment is not None:
+            voxel, kp_2d, vis = self.augment(voxel, kp_2d, vis)
 
         # Normalize keypoints to [0, 1]
         kp_norm = kp_2d / np.array([self.IMG_W, self.IMG_H], dtype=np.float32)

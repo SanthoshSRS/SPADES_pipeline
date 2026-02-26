@@ -28,6 +28,7 @@ Usage:
 import os
 import argparse
 import numpy as np
+import cv2
 import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
@@ -35,6 +36,90 @@ from torch.utils.data import DataLoader
 from src.models.keypoint_net import KeypointPoseNet
 from src.data.keypoint_dataset import KeypointDataset
 from src.data.dataset import select_stratified_subset, train_val_split
+
+
+def _train_augment(voxel: np.ndarray, kp_2d: np.ndarray, vis: np.ndarray):
+    """Joint voxel + keypoint augmentation for training.
+
+    Spatial augmentations (rotation, translation) consistently transform
+    both the voxel grid and the 2D keypoint coordinates so labels stay valid.
+    Non-spatial augmentations (noise, lines) modify only the voxel.
+
+    Based on Jawaid et al. (SEENIC): RandomEventNoise, RandomEventLines,
+    random rotation, random translation.
+
+    Args:
+        voxel:  (C, H, W) float32 numpy, at training resolution (256×448)
+        kp_2d:  (8, 2)   float32 numpy, pixel coords in original 1280×720 space
+        vis:    (8,)     bool numpy
+
+    Returns: (voxel, kp_2d, vis) — kp_2d still in 1280×720 pixel space
+    """
+    C, H, W = voxel.shape
+    voxel = voxel.copy()
+
+    # Normalize kp to [0,1] for spatial transform math
+    kp_norm = kp_2d / np.array([1280.0, 720.0], dtype=np.float32)  # (8, 2)
+
+    # 1. Random rotation ±15° around image centre
+    if np.random.rand() < 0.5:
+        angle_deg = np.random.uniform(-15.0, 15.0)
+        angle_rad = angle_deg * (np.pi / 180.0)
+        M = cv2.getRotationMatrix2D((W / 2.0, H / 2.0), angle_deg, 1.0)
+        for c in range(C):
+            voxel[c] = cv2.warpAffine(voxel[c], M, (W, H),
+                                       flags=cv2.INTER_LINEAR,
+                                       borderMode=cv2.BORDER_CONSTANT,
+                                       borderValue=0.0)
+        # Same rotation in normalised [0,1] space around (0.5, 0.5)
+        cos_a, sin_a = np.cos(angle_rad), np.sin(angle_rad)
+        du = kp_norm[:, 0] - 0.5
+        dv = kp_norm[:, 1] - 0.5
+        kp_norm[:, 0] = 0.5 + cos_a * du + sin_a * dv
+        kp_norm[:, 1] = 0.5 - sin_a * du + cos_a * dv
+        vis = vis & (kp_norm[:, 0] >= 0) & (kp_norm[:, 0] < 1.0) & \
+                    (kp_norm[:, 1] >= 0) & (kp_norm[:, 1] < 1.0)
+
+    # 2. Random translation ±10% of image size
+    if np.random.rand() < 0.5:
+        dx_norm = np.random.uniform(-0.1, 0.1)
+        dy_norm = np.random.uniform(-0.1, 0.1)
+        M = np.float32([[1, 0, dx_norm * W], [0, 1, dy_norm * H]])
+        for c in range(C):
+            voxel[c] = cv2.warpAffine(voxel[c], M, (W, H),
+                                       flags=cv2.INTER_LINEAR,
+                                       borderMode=cv2.BORDER_CONSTANT,
+                                       borderValue=0.0)
+        kp_norm[:, 0] += dx_norm
+        kp_norm[:, 1] += dy_norm
+        vis = vis & (kp_norm[:, 0] >= 0) & (kp_norm[:, 0] < 1.0) & \
+                    (kp_norm[:, 1] >= 0) & (kp_norm[:, 1] < 1.0)
+
+    # Convert back to original 1280×720 pixel space for dataset normalisation
+    kp_2d = kp_norm * np.array([1280.0, 720.0], dtype=np.float32)
+
+    # 3. RandomEventNoise — intensity scale + hot/dead pixels
+    voxel *= float(np.random.uniform(0.8, 1.2))
+    if np.random.rand() < 0.7:
+        n = max(1, int(0.01 * H * W))
+        mv = float(np.abs(voxel).max()) + 0.5
+        ys = np.random.randint(0, H, n)
+        xs = np.random.randint(0, W, n)
+        voxel[:, ys, xs] = mv                # salt (hot pixels)
+        ys = np.random.randint(0, H, n)
+        xs = np.random.randint(0, W, n)
+        voxel[:, ys, xs] = 0.0              # pepper (dead pixels)
+
+    # 4. RandomEventLines — horizontal/vertical artifact lines
+    if np.random.rand() < 0.3:
+        mv = float(np.abs(voxel).max())
+        for _ in range(np.random.randint(1, 4)):
+            if np.random.rand() < 0.5:
+                voxel[:, np.random.randint(0, H), :] = mv   # horizontal
+            else:
+                voxel[:, :, np.random.randint(0, W)] = mv   # vertical
+
+    return voxel, kp_2d, vis
 
 # ── 3D keypoints — must match scripts/generate_keypoint_labels.py ────────────
 KEYPOINTS_3D = np.array([
@@ -195,6 +280,7 @@ def main():
         sequence_ids       = train_ids,
         min_visible        = args.min_visible,
         transform          = resize_voxel,
+        augment            = _train_augment,
     )
     val_ds = KeypointDataset(
         preprocessed_dir   = args.preprocessed_dir,
