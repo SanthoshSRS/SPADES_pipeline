@@ -452,18 +452,26 @@ def main():
     
     if args.resume:
         print(f"\nResuming from checkpoint: {args.resume}")
-        checkpoint = torch.load(args.resume)
+        checkpoint = torch.load(args.resume, weights_only=False)
         model.load_state_dict(checkpoint['model_state_dict'])
         if 'optimizer_state_dict' in checkpoint:
             optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
         else:
             print("  Warning: optimizer state not in checkpoint, starting optimizer fresh")
+        if 'scheduler_state_dict' in checkpoint:
+            scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+        if scaler and checkpoint.get('scaler_state_dict') is not None:
+            scaler.load_state_dict(checkpoint['scaler_state_dict'])
+        epochs_without_improvement = checkpoint.get('epochs_without_improvement', 0)
         start_epoch = checkpoint.get('epoch', -1) + 1
         best_val_loss = checkpoint.get('best_val_loss', float('inf'))
-    
+        print(f"  Resumed epoch {start_epoch}, best_val_loss={best_val_loss:.4f}, "
+              f"patience_counter={epochs_without_improvement}")
+    else:
+        epochs_without_improvement = 0
+
     # Training loop
     print(f"\nStarting training for {config['training']['num_epochs']} epochs...")
-    epochs_without_improvement = 0
     
     total_epochs = config['training']['num_epochs']
     for epoch in range(start_epoch, total_epochs):
@@ -515,6 +523,9 @@ def main():
             'epoch': epoch,
             'model_state_dict': model.state_dict(),
             'optimizer_state_dict': optimizer.state_dict(),
+            'scheduler_state_dict': scheduler.state_dict(),
+            'scaler_state_dict': scaler.state_dict() if scaler else None,
+            'epochs_without_improvement': epochs_without_improvement,
             'train_metrics': train_metrics,
             'val_metrics': val_metrics,
             'best_val_loss': best_val_loss,

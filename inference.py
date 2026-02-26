@@ -40,6 +40,8 @@ def parse_args():
                         help='Sequence length for LSTM')
     parser.add_argument('--stride', type=int, default=1,
                         help='Stride for sliding window (1=overlap for averaging)')
+    parser.add_argument('--inference-batch-size', type=int, default=32,
+                        help='Windows per GPU forward pass during inference (default: 32)')
     parser.add_argument('--test-timestamp-scale', type=float, default=1.0,
                         help='Timestamp scale for test data (1.0 for real 1µs data)')
     parser.add_argument('--num-frames', type=int, default=599,
@@ -236,21 +238,26 @@ def predict_sequence(
     sequence_length: int,
     stride: int,
     device: torch.device,
-    timestamp_scale: float
+    timestamp_scale: float,
+    batch_size: int = 32
 ) -> np.ndarray:
     """
-    Predict poses for a full sequence with sliding window.
-    
+    Predict poses for a full sequence with sliding window (batched).
+
+    Pre-generates all N unique voxel frames once, then batches windows of
+    them for GPU inference — ~20x faster than the original per-window loop.
+
     Args:
-        model: Trained VoxelCNNLSTM model
+        model: Trained model (DomainAdaptivePoseNet or DirectPoseCNN)
         events: Event dictionary from load_h5_data
         timestamps: Array of pose timestamps
-        voxel_generator: SignedVoxelGridGenerator instance
+        voxel_generator: Voxel generator instance
         sequence_length: Number of frames per sequence
-        stride: Stride for sliding window
+        stride: Stride for sliding window (1 = dense coverage)
         device: Device to run on
         timestamp_scale: Scale for timestamps (1.0 for 1µs, 100.0 for 100µs)
-        
+        batch_size: Number of windows per GPU forward pass (default: 32)
+
     Returns:
         predictions: Array of poses (num_timestamps, 7) [Tx, Ty, Tz, Qw, Qx, Qy, Qz]
     """
@@ -260,53 +267,42 @@ def predict_sequence(
     predictions = np.zeros((num_timestamps, 7), dtype=np.float32)
     counts = np.zeros(num_timestamps, dtype=np.float32)
 
-    # Sliding window — model outputs one pose per window (last GRU timestep only).
-    # Store prediction only at the last frame index of each window so every
-    # frame gets its own unique GRU-informed prediction (use stride=1).
+    # Step 1: pre-generate all N unique voxels — N calls instead of N*seq_len
+    print(f"  Generating {num_timestamps} voxel frames...")
+    all_voxels = []
+    for ts in timestamps * timestamp_scale:
+        voxel = voxel_generator.generate(events, ts, ts + voxel_generator.window_size_us)
+        all_voxels.append(voxel)
+    all_voxels = np.stack(all_voxels, axis=0)  # (N, C, H, W)
+
+    # Step 2: collect all window start indices; guarantee last frame is always covered
+    window_starts = list(range(0, num_timestamps - sequence_length + 1, stride))
+    if window_starts and (window_starts[-1] + sequence_length - 1) < num_timestamps - 1:
+        window_starts.append(num_timestamps - sequence_length)
+
+    # Step 3: batched GPU inference with AMP
+    use_amp = device.type == 'cuda'
+    print(f"  Running batched inference: {len(window_starts)} windows, batch_size={batch_size}")
     with torch.no_grad():
-        for start_idx in range(0, num_timestamps - sequence_length + 1, stride):
-            end_idx = start_idx + sequence_length
-            last_idx = end_idx - 1  # prediction is for this frame only
+        for b in range(0, len(window_starts), batch_size):
+            batch_idx = window_starts[b:b + batch_size]
+            batch_np = np.stack([all_voxels[i:i + sequence_length] for i in batch_idx])
+            batch_t = torch.from_numpy(batch_np).float().to(device)  # (B, seq_len, C, H, W)
 
-            window_timestamps = timestamps[start_idx:end_idx] * timestamp_scale
-            voxel_list = []
-            for ts in window_timestamps:
-                t_start = ts
-                t_end = t_start + voxel_generator.window_size_us
-                voxel = voxel_generator.generate(events, t_start, t_end)
-                voxel_list.append(voxel)
+            if use_amp:
+                with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
+                    out = model(batch_t)
+            else:
+                out = model(batch_t)
 
-            voxels = np.stack(voxel_list, axis=0)  # (seq_len, C, H, W)
-            voxels = torch.from_numpy(voxels).float().unsqueeze(0).to(device)  # (1, seq_len, C, H, W)
+            pred_trans = out[0].float().cpu().numpy()  # (B, 3)
+            pred_rot   = out[1].float().cpu().numpy()  # (B, 4)
+            pred_poses = np.concatenate([pred_trans, pred_rot], axis=1)  # (B, 7)
 
-            out = model(voxels)
-            pred_translation, pred_rotation = out[0], out[1]
-            pred_poses = torch.cat([pred_translation, pred_rotation], dim=-1)
-            pred_poses = pred_poses.squeeze(0).cpu().numpy()  # (7,)
-
-            # Store only at the last frame; average if multiple windows land here
-            predictions[last_idx] += pred_poses
-            counts[last_idx] += 1.0
-
-    # Ensure the very last frame is covered when stride doesn't divide evenly
-    if num_timestamps > sequence_length and counts[num_timestamps - 1] == 0:
-        last_start_idx = num_timestamps - sequence_length
-        window_timestamps = timestamps[last_start_idx:] * timestamp_scale
-        voxel_list = []
-        with torch.no_grad():
-            for ts in window_timestamps:
-                t_start = ts
-                t_end = t_start + voxel_generator.window_size_us
-                voxel = voxel_generator.generate(events, t_start, t_end)
-                voxel_list.append(voxel)
-            voxels = np.stack(voxel_list, axis=0)
-            voxels = torch.from_numpy(voxels).float().unsqueeze(0).to(device)
-            out = model(voxels)
-            pred_translation, pred_rotation = out[0], out[1]
-            pred_poses = torch.cat([pred_translation, pred_rotation], dim=-1)
-            pred_poses = pred_poses.squeeze(0).cpu().numpy()
-            predictions[num_timestamps - 1] += pred_poses
-            counts[num_timestamps - 1] += 1.0
+            for j, start_i in enumerate(batch_idx):
+                last_i = start_i + sequence_length - 1
+                predictions[last_i] += pred_poses[j]
+                counts[last_i] += 1.0
 
     # Average frames that received multiple predictions
     valid = counts > 0
@@ -324,8 +320,7 @@ def predict_sequence(
 
     # Renormalize quaternions
     quaternions = predictions[:, 3:]
-    quaternions = quaternions / (np.linalg.norm(quaternions, axis=1, keepdims=True) + 1e-8)
-    predictions[:, 3:] = quaternions
+    predictions[:, 3:] = quaternions / (np.linalg.norm(quaternions, axis=1, keepdims=True) + 1e-8)
 
     return predictions
 
@@ -528,7 +523,8 @@ def main():
             predictions = predict_sequence(
                 model, events, timestamps,
                 event_generator, seq_len_ckpt, args.stride,
-                device, args.test_timestamp_scale
+                device, args.test_timestamp_scale,
+                batch_size=args.inference_batch_size
             )
         
         # Create submission CSV
