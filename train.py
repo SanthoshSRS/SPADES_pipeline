@@ -147,6 +147,67 @@ def create_dataloaders(config: Dict, device: str, preprocessed_dir: str = None):
     return train_loader, val_loader
 
 
+class ThreadPrefetcher:
+    """
+    N threads pull batch-indices from a shared iterator over batch_sampler,
+    read dataset items in parallel (h5py releases GIL → genuine parallel NFS I/O),
+    collate them, and push batches into a bounded output queue.
+
+    No /dev/shm, no worker processes, no IPC crashes.
+    Batch order is not guaranteed (fine for training and metric aggregation).
+    """
+    def __init__(self, loader, num_threads: int = 4, buffer_size: int = 8):
+        self.loader = loader
+        self.num_threads = num_threads
+        self.buffer_size = buffer_size
+
+    def __iter__(self):
+        import threading
+        from queue import Queue
+
+        dataset       = self.loader.dataset
+        collate_fn    = self.loader.collate_fn
+        batch_sampler = self.loader.batch_sampler
+
+        # Shared iterator; lock protects next() across threads
+        batch_iter = iter(batch_sampler)
+        iter_lock  = threading.Lock()
+        out_q      = Queue(maxsize=self.buffer_size)
+        _DONE      = object()
+
+        def _worker():
+            while True:
+                with iter_lock:
+                    try:
+                        indices = next(batch_iter)
+                    except StopIteration:
+                        return
+                # h5py releases GIL here — parallel reads across threads
+                samples = [dataset[i] for i in indices]
+                batch   = collate_fn(samples)
+                out_q.put(batch)
+
+        threads = [threading.Thread(target=_worker, daemon=True)
+                   for _ in range(self.num_threads)]
+        for t in threads:
+            t.start()
+
+        def _sentinel():
+            for t in threads:
+                t.join()
+            out_q.put(_DONE)
+        threading.Thread(target=_sentinel, daemon=True).start()
+
+        while True:
+            item = out_q.get()
+            if item is _DONE:
+                break
+            yield item
+
+    def __len__(self):
+        return len(self.loader)
+
+
 def compute_grl_alpha(epoch: int, total_epochs: int) -> float:
     """Standard DANN schedule: sigmoid ramp from 0 → 1 over training."""
     import math
@@ -184,9 +245,9 @@ def train_epoch(
     lambda_domain: float = 0.0,
 ) -> Dict[str, float]:
     """Train for one epoch with optional mixed precision (AMP)."""
-    
     model.train()
     metrics_tracker = MetricsTracker()
+    dataloader = ThreadPrefetcher(dataloader, num_threads=4, buffer_size=8)  # parallel h5 I/O threads
 
     total_loss = 0.0
     total_trans_loss = 0.0
@@ -290,10 +351,10 @@ def validate(
     device: torch.device
 ) -> Dict[str, float]:
     """Validate model."""
-    
     model.eval()
     metrics_tracker = MetricsTracker()
-    
+    dataloader = ThreadPrefetcher(dataloader, num_threads=4, buffer_size=8)
+
     total_loss = 0.0
     total_trans_loss = 0.0
     total_rot_loss = 0.0
