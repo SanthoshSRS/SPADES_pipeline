@@ -7,6 +7,7 @@ import os
 import sys
 import argparse
 import torch
+import torch.nn.functional as F
 import numpy as np
 import pandas as pd
 from glob import glob
@@ -111,6 +112,7 @@ def predict_pnp(
     device: torch.device,
     timestamp_scale: float,
     keypoints_3d: np.ndarray,
+    input_size: tuple = None,
 ) -> np.ndarray:
     """
     Predict poses using CNN keypoint regression + PnP solver.
@@ -156,7 +158,10 @@ def predict_pnp(
             t_end   = t_start + event_generator.window_size_us
             frame   = event_generator.generate(events, t_start, t_end)
 
-            frame_t = torch.from_numpy(frame).float().unsqueeze(0).to(device)
+            frame_t = torch.from_numpy(frame).float().unsqueeze(0)
+            if input_size is not None:
+                frame_t = F.interpolate(frame_t, size=input_size, mode='bilinear', align_corners=False)
+            frame_t = frame_t.to(device)
             kp_norm = model(frame_t).cpu().numpy().reshape(8, 2)   # normalized [0,1]
 
             # Back to pixel coordinates
@@ -474,10 +479,14 @@ def main():
                     "KeypointPoseNet checkpoint missing 'keypoints_3d' — "
                     "retrain with train_keypoints.py (it embeds them automatically)."
                 )
+            ckpt_input_size = checkpoint.get('input_size', None)
+            if ckpt_input_size is not None:
+                ckpt_input_size = tuple(ckpt_input_size)
             predictions = predict_pnp(
                 model, events, timestamps,
                 event_generator, device, args.test_timestamp_scale,
                 keypoints_3d=keypoints_3d,
+                input_size=ckpt_input_size,
             )
         elif seq_len_ckpt == 1:
             predictions = predict_frame_by_frame(

@@ -285,6 +285,8 @@ def main():
                 # Embed 3D keypoints so inference.py can load them without extra config
                 'keypoints_3d':         KEYPOINTS_3D,
                 'model_type':           'KeypointPoseNet',
+                # Embed input size so inference.py resizes frames to match training
+                'input_size':           [in_h, in_w],
             }, ckpt_path)
             marker = " ✓ BEST"
         else:
