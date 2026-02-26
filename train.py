@@ -124,24 +124,24 @@ def create_dataloaders(config: Dict, device: str, preprocessed_dir: str = None):
     )
     
     # Create dataloaders
+    nw = config['training']['num_workers']
+    loader_kwargs = dict(
+        num_workers=nw,
+        pin_memory=(nw > 0 and device == 'cuda'),
+        prefetch_factor=(4 if nw > 0 else None),
+        persistent_workers=(nw > 0),
+    )
     train_loader = DataLoader(
         train_dataset,
         batch_size=config['training']['batch_size'],
         shuffle=True,
-        num_workers=config['training']['num_workers'],
-        pin_memory=(device == 'cuda'),
-        prefetch_factor=4,
-        persistent_workers=True  # Keep workers alive between epochs
+        **loader_kwargs,
     )
-
     val_loader = DataLoader(
         val_dataset,
         batch_size=config['training']['batch_size'],
         shuffle=False,
-        num_workers=config['training']['num_workers'],
-        pin_memory=(device == 'cuda'),
-        prefetch_factor=4,
-        persistent_workers=True
+        **loader_kwargs,
     )
     
     return train_loader, val_loader

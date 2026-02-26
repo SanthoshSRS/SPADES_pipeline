@@ -30,7 +30,7 @@ training:
   num_epochs: 100
   learning_rate: 0.00005  # 5e-5 for batch 16
   weight_decay: 0.00001
-  num_workers: 16
+  num_workers: 0         # 0 = synchronous loading, no workers, no /dev/shm — avoids all IPC crashes
   
   # Learning rate scheduler
   scheduler_factor: 0.5
