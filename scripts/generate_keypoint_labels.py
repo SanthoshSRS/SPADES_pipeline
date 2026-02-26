@@ -35,22 +35,34 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 # ── Proba-2 body-frame keypoints (meters) ────────────────────────────────────
 # Based on SPADES paper: physical mockup is 0.64 × 0.24 × 0.416m at 1:2.5 scale.
 # Full-scale simulation model: ~1.6 × 0.6 × 1.04m.
-# 8 bounding-box corners — axes:
-#   X (±0.80): solar panel span
-#   Y (±0.30): body height
-#   Z (±0.52): depth axis
+# Axes:  X (±0.80): solar panel span, Y (±0.30): body height, Z (±0.52): depth
 # GT pose: P_cam = R @ P_body + t  (R from [Qx,Qy,Qz,Qw], t = [Tx,Ty,Tz])
 # Validate projections with --visualize before training!
+#
+# 14 keypoints = 8 bounding-box corners + 6 face centres
+#   Corners: PnP-optimal (span full 3D volume, geometrically non-degenerate)
+#   Face centres: at least 1 face always visible regardless of viewing angle,
+#                 improves RANSAC inlier count and rotation coverage
 KEYPOINTS_3D = np.array([
-    [+0.80, +0.30, +0.52],   # 0: +X+Y+Z  (solar panel tip, top, front)
-    [+0.80, +0.30, -0.52],   # 1: +X+Y-Z  (solar panel tip, top, back)
-    [+0.80, -0.30, +0.52],   # 2: +X-Y+Z  (solar panel tip, bottom, front)
-    [+0.80, -0.30, -0.52],   # 3: +X-Y-Z  (solar panel tip, bottom, back)
-    [-0.80, +0.30, +0.52],   # 4: -X+Y+Z  (other solar panel tip, top, front)
-    [-0.80, +0.30, -0.52],   # 5: -X+Y-Z
-    [-0.80, -0.30, +0.52],   # 6: -X-Y+Z
-    [-0.80, -0.30, -0.52],   # 7: -X-Y-Z  (other solar panel tip, bottom, back)
-], dtype=np.float64)  # (8, 3)
+    # ── 8 bounding-box corners ──────────────────────────────────────────────
+    [+0.80, +0.30, +0.52],   #  0: +X+Y+Z  (solar panel tip, top, front)
+    [+0.80, +0.30, -0.52],   #  1: +X+Y-Z  (solar panel tip, top, back)
+    [+0.80, -0.30, +0.52],   #  2: +X-Y+Z  (solar panel tip, bottom, front)
+    [+0.80, -0.30, -0.52],   #  3: +X-Y-Z  (solar panel tip, bottom, back)
+    [-0.80, +0.30, +0.52],   #  4: -X+Y+Z  (other solar panel tip, top, front)
+    [-0.80, +0.30, -0.52],   #  5: -X+Y-Z
+    [-0.80, -0.30, +0.52],   #  6: -X-Y+Z
+    [-0.80, -0.30, -0.52],   #  7: -X-Y-Z  (other solar panel tip, bottom, back)
+    # ── 6 face centres ──────────────────────────────────────────────────────
+    [+0.80,   0.0,   0.0],   #  8: +X face centre  (solar panel face)
+    [-0.80,   0.0,   0.0],   #  9: -X face centre  (other solar panel face)
+    [  0.0, +0.30,   0.0],   # 10: +Y face centre  (top face)
+    [  0.0, -0.30,   0.0],   # 11: -Y face centre  (bottom face)
+    [  0.0,   0.0, +0.52],   # 12: +Z face centre  (front face)
+    [  0.0,   0.0, -0.52],   # 13: -Z face centre  (back face)
+], dtype=np.float64)  # (14, 3)
+
+NUM_KEYPOINTS = len(KEYPOINTS_3D)   # 14
 
 # Camera intrinsics from SPADES/camera.json
 FX = FY = 1258.6057531097028
@@ -113,8 +125,8 @@ def process_sequence(h5_path: str, output_dir: str, do_visualize: bool = False) 
     Qw = labels['Qw'].astype(np.float64)
 
     N = len(Tx)
-    keypoints_2d = np.zeros((N, 8, 2), dtype=np.float32)
-    visibility   = np.zeros((N, 8),    dtype=bool)
+    keypoints_2d = np.zeros((N, NUM_KEYPOINTS, 2), dtype=np.float32)
+    visibility   = np.zeros((N, NUM_KEYPOINTS),    dtype=bool)
 
     for i in range(N):
         # scipy uses [x, y, z, w] quaternion convention
@@ -162,16 +174,23 @@ def _visualize(seq_id: str, h5_path: str, keypoints_2d: np.ndarray,
         fig, ax = plt.subplots(1, 1, figsize=(13, 7))
         ax.imshow(display, cmap='gray', origin='upper')
 
-        # circles = +X side (corners 0-3), squares = -X side (corners 4-7)
-        colors  = ['red', 'red', 'orange', 'orange',
-                   'cyan', 'cyan', 'lime', 'lime']
-        markers = ['o', 's', 'o', 's', 'o', 's', 'o', 's']
+        # corners (0-7): two shades per axis pair; face centres (8-13): white
+        K_total = len(keypoints_2d[frame_idx])
+        corner_colors  = ['red', 'red', 'orange', 'orange',
+                          'cyan', 'cyan', 'lime', 'lime']
+        face_colors    = ['magenta', 'magenta', 'yellow', 'yellow',
+                          'white', 'white']
+        all_colors  = corner_colors + face_colors[:max(0, K_total - 8)]
+        corner_markers = ['o', 's', 'o', 's', 'o', 's', 'o', 's']
+        face_markers   = ['D'] * 6
+        all_markers = corner_markers + face_markers[:max(0, K_total - 8)]
 
         kp  = keypoints_2d[frame_idx]
         vis = visibility[frame_idx]
 
-        for j in range(8):
-            c, m = colors[j], markers[j]
+        for j in range(K_total):
+            c = all_colors[j] if j < len(all_colors) else 'white'
+            m = all_markers[j] if j < len(all_markers) else 'D'
             if vis[j]:
                 ax.scatter(kp[j, 0], kp[j, 1], c=c, s=120, marker=m,
                            edgecolors='white', linewidths=0.5, zorder=5)
@@ -183,7 +202,7 @@ def _visualize(seq_id: str, h5_path: str, keypoints_2d: np.ndarray,
 
         ax.set_title(
             f"{seq_id} frame {frame_idx}  |  "
-            f"solid=visible ({vis.sum()}/8), x=out-of-bounds\n"
+            f"solid=visible ({vis.sum()}/{K_total}), x=out-of-bounds\n"
             f"Keypoints should appear near satellite edges. "
             f"If not, adjust KEYPOINTS_3D in this script.",
             fontsize=10

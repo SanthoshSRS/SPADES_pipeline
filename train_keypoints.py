@@ -1,27 +1,43 @@
 #!/usr/bin/env python3
 """
-Train KeypointPoseNet to regress 8 satellite keypoints from event frames.
+Train keypoint models to predict satellite keypoints for PnP-based pose estimation.
 
-Uses L1 loss on visible keypoints only. Keypoints are normalized [0,1].
+Supports two model architectures:
+  --model-type heatmap  (default, recommended)
+      KeypointHeatmapNet: ResNet-50 + ConvTranspose decoder → K heatmaps (H/4 × W/4).
+      Trained with MSE loss against 2D Gaussian targets.  Soft-argmax extracts coords.
+      Removes GlobalAvgPool bottleneck — expected val px: 20–40 px.
+
+  --model-type direct
+      KeypointPoseNet: ResNet-50 → GlobalAvgPool → FC → K×2.
+      Trained with masked L1 loss.  Original approach.  Expected val px: 100–160 px.
+
+Uses masked loss on visible keypoints only. Keypoints are normalized [0,1].
 After training, use inference.py with the saved checkpoint — it auto-detects
-the keypoint model and uses PnP to solve for 6-DoF pose.
+the model type from the checkpoint and uses PnP to solve for 6-DoF pose.
 
 Usage:
     # Generate labels first (one-time, ~1 min on CPU):
     python scripts/generate_keypoint_labels.py --h5-dir h5 --output-dir keypoint_labels --visualize
 
-    # Verify keypoint_validation_RT*.png look correct, then train:
-    python train_keypoints.py \
-        --preprocessed-dir preprocessed_voxels_100pct \
-        --keypoint-label-dir keypoint_labels \
-        --amp
+    # Stage 1 — validate heatmap architecture at 256×448 (fast):
+    HDF5_USE_FILE_LOCKING=FALSE python train_keypoints.py \\
+        --preprocessed-dir preprocessed_voxels_256x448 \\
+        --keypoint-label-dir keypoint_labels \\
+        --amp --num-workers 16 --batch-size 256
+
+    # Stage 2 — full resolution + 14 keypoints:
+    HDF5_USE_FILE_LOCKING=FALSE python train_keypoints.py \\
+        --preprocessed-dir preprocessed_voxels_100pct \\
+        --keypoint-label-dir keypoint_labels_14 \\
+        --num-keypoints 14 --batch-size 32 --num-workers 8 --amp
 
     # Inference with PnP:
-    python inference.py \
-        --checkpoint checkpoints/keypoint_best.pth \
-        --test-dir SPARK_stream2_test_data \
-        --output-dir submission_keypoint_pnp \
-        --test-timestamp-scale 1.0 \
+    python inference.py \\
+        --checkpoint checkpoints/keypoint_best.pth \\
+        --test-dir SPARK_stream2_test_data \\
+        --output-dir submission_keypoint_pnp \\
+        --test-timestamp-scale 1.0 \\
         --template SPARK_stream2_test_data/template.csv
 """
 
@@ -34,6 +50,9 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader
 
 from src.models.keypoint_net import KeypointPoseNet
+from src.models.keypoint_heatmap_net import (
+    KeypointHeatmapNet, heatmap_loss, soft_argmax_2d,
+)
 from src.data.keypoint_dataset import KeypointDataset
 from src.data.dataset import select_stratified_subset, train_val_split
 
@@ -163,7 +182,26 @@ def mean_pixel_error(pred: torch.Tensor, gt: torch.Tensor, vis: torch.Tensor) ->
 # Train / val loops
 # ─────────────────────────────────────────────────────────────────────────────
 
-def train_epoch(model, loader, optimizer, device, scaler=None, resize_size=None):
+def _forward(model, voxels, kp_gt, vis, is_heatmap: bool):
+    """Unified forward pass for both model types.
+
+    Returns:
+        loss:    scalar training loss
+        kp_pred: (B, K, 2) normalized [0,1] keypoint coords (for pixel error metric)
+    """
+    if is_heatmap:
+        pred_hm = model(voxels)                                    # (B, K, H_hm, W_hm)
+        loss    = heatmap_loss(pred_hm, kp_gt, vis)
+        kp_pred = soft_argmax_2d(pred_hm.detach().float())        # (B, K, 2) for metric
+    else:
+        K       = kp_gt.shape[1]
+        kp_pred = model(voxels).view(-1, K, 2)
+        loss    = masked_l1_loss(kp_pred, kp_gt, vis)
+    return loss, kp_pred
+
+
+def train_epoch(model, loader, optimizer, device, scaler=None, resize_size=None,
+                is_heatmap: bool = False):
     model.train()
     total_loss, total_px, n = 0.0, 0.0, 0
     for batch_idx, (voxels, kp_gt, vis) in enumerate(loader):
@@ -177,16 +215,14 @@ def train_epoch(model, loader, optimizer, device, scaler=None, resize_size=None)
 
         if scaler is not None:
             with torch.autocast(device_type='cuda', dtype=torch.float16):
-                kp_pred = model(voxels).view(-1, 8, 2)
-                loss = masked_l1_loss(kp_pred, kp_gt, vis)
+                loss, kp_pred = _forward(model, voxels, kp_gt, vis, is_heatmap)
             scaler.scale(loss).backward()
             scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             scaler.step(optimizer)
             scaler.update()
         else:
-            kp_pred = model(voxels).view(-1, 8, 2)
-            loss = masked_l1_loss(kp_pred, kp_gt, vis)
+            loss, kp_pred = _forward(model, voxels, kp_gt, vis, is_heatmap)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
@@ -205,7 +241,7 @@ def train_epoch(model, loader, optimizer, device, scaler=None, resize_size=None)
 
 
 @torch.no_grad()
-def val_epoch(model, loader, device, resize_size=None):
+def val_epoch(model, loader, device, resize_size=None, is_heatmap: bool = False):
     model.eval()
     total_loss, total_px, n = 0.0, 0.0, 0
 
@@ -216,9 +252,8 @@ def val_epoch(model, loader, device, resize_size=None):
         kp_gt  = kp_gt.to(device, non_blocking=True)
         vis    = vis.to(device, non_blocking=True)
 
-        kp_pred = model(voxels).view(-1, 8, 2)
-        loss    = masked_l1_loss(kp_pred, kp_gt, vis)
-        px      = mean_pixel_error(kp_pred, kp_gt, vis)
+        loss, kp_pred = _forward(model, voxels, kp_gt, vis, is_heatmap)
+        px = mean_pixel_error(kp_pred.float(), kp_gt, vis)
 
         total_loss += loss.item()
         total_px   += px
@@ -232,8 +267,8 @@ def val_epoch(model, loader, device, resize_size=None):
 # ─────────────────────────────────────────────────────────────────────────────
 
 def main():
-    parser = argparse.ArgumentParser(description='Train KeypointPoseNet')
-    parser.add_argument('--preprocessed-dir',    default='preprocessed_voxels_100pct')
+    parser = argparse.ArgumentParser(description='Train keypoint model (heatmap or direct)')
+    parser.add_argument('--preprocessed-dir',    default='preprocessed_voxels_256x448')
     parser.add_argument('--keypoint-label-dir',  default='keypoint_labels')
     parser.add_argument('--data-subset',         default='100pct',
                         choices=['25pct', '100pct'])
@@ -245,6 +280,12 @@ def main():
     parser.add_argument('--amp',                 action='store_true',
                         help='Mixed precision (AMP)')
     parser.add_argument('--num-workers',         type=int, default=8)
+    # Model type
+    parser.add_argument('--model-type',          default='heatmap',
+                        choices=['heatmap', 'direct'],
+                        help='heatmap=KeypointHeatmapNet (recommended), direct=KeypointPoseNet')
+    parser.add_argument('--num-keypoints',       type=int, default=8,
+                        help='Number of keypoints K — must match keypoint label files (default: 8)')
     # Hyperparameters
     parser.add_argument('--batch-size',          type=int,   default=32)
     parser.add_argument('--lr',                  type=float, default=1e-4)
@@ -254,8 +295,8 @@ def main():
     parser.add_argument('--min-visible',         type=int,   default=4,
                         help='Min visible keypoints per frame (default: 4)')
     parser.add_argument('--input-size',          type=int,   nargs=2,
-                        default=[256, 448], metavar=('H', 'W'),
-                        help='Resize voxel input to H×W before feeding to CNN (default: 256 448)')
+                        default=None, metavar=('H', 'W'),
+                        help='Resize voxel to H×W in workers (default: no resize — use native resolution of --preprocessed-dir)')
     args = parser.parse_args()
 
     device = torch.device(args.device if torch.cuda.is_available() else 'cpu')
@@ -266,20 +307,25 @@ def main():
     all_ids    = select_stratified_subset(total_sequences=300, subset_pct=subset_pct)
     train_ids, val_ids = train_val_split(all_ids, val_ratio=0.1)
 
-    # Resize on CPU in workers: sends 1.4MB/frame over PCIe instead of 11MB/frame.
-    # fork start method means local functions are picklable — no forkserver issue.
-    in_h, in_w = args.input_size
-    def resize_voxel(voxel):
-        t = torch.from_numpy(np.array(voxel, dtype=np.float32)).unsqueeze(0)
-        t = F.interpolate(t, size=(in_h, in_w), mode='bilinear', align_corners=False)
-        return t.squeeze(0).numpy()
+    # Optional CPU resize in workers (reduces NFS bandwidth for full-res dirs).
+    # If --input-size not set, use the native resolution of the preprocessed dir.
+    if args.input_size is not None:
+        in_h, in_w = args.input_size
+        def resize_voxel(voxel):
+            t = torch.from_numpy(np.array(voxel, dtype=np.float32)).unsqueeze(0)
+            t = F.interpolate(t, size=(in_h, in_w), mode='bilinear', align_corners=False)
+            return t.squeeze(0).numpy()
+        transform_fn = resize_voxel
+    else:
+        in_h, in_w   = None, None   # determined at runtime from first batch
+        transform_fn = None
 
     train_ds = KeypointDataset(
         preprocessed_dir   = args.preprocessed_dir,
         keypoint_label_dir = args.keypoint_label_dir,
         sequence_ids       = train_ids,
         min_visible        = args.min_visible,
-        transform          = resize_voxel,
+        transform          = transform_fn,
         augment            = _train_augment,
     )
     val_ds = KeypointDataset(
@@ -287,7 +333,7 @@ def main():
         keypoint_label_dir = args.keypoint_label_dir,
         sequence_ids       = val_ids,
         min_visible        = args.min_visible,
-        transform          = resize_voxel,
+        transform          = transform_fn,
     )
 
     # Use fork (default) + open/close h5 per __getitem__ — same pattern as
@@ -302,11 +348,21 @@ def main():
     )
 
     # ── Model ─────────────────────────────────────────────────────────────────
-    model = KeypointPoseNet(
-        num_input_channels=3,
-        dropout=0.2,
-        pretrained_backbone=True,
-    ).to(device)
+    is_heatmap = (args.model_type == 'heatmap')
+    if is_heatmap:
+        model = KeypointHeatmapNet(
+            num_keypoints      = args.num_keypoints,
+            num_input_channels = 3,
+            pretrained_backbone= True,
+        ).to(device)
+        model_type_str = 'KeypointHeatmapNet'
+    else:
+        model = KeypointPoseNet(
+            num_input_channels = 3,
+            dropout            = 0.2,
+            pretrained_backbone= True,
+        ).to(device)
+        model_type_str = 'KeypointPoseNet'
 
     optimizer = torch.optim.Adam(
         model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
@@ -329,20 +385,24 @@ def main():
         print(f"Resumed from {args.resume} at epoch {start_epoch}")
 
     total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    print(f"\nTraining KeypointPoseNet on {device}")
-    print(f"  Params:     {total_params:,}")
-    print(f"  Train:      {len(train_ds):,} frames | Val: {len(val_ds):,} frames")
-    print(f"  Input size: {in_h}×{in_w} (resized from 720×1280)")
-    print(f"  Batch size: {args.batch_size} | LR: {args.lr} | AMP: {args.amp}")
-    print(f"  Checkpoint: {os.path.join(args.checkpoint_dir, args.checkpoint_name)}")
+    input_desc = f"{in_h}×{in_w} (resized)" if in_h else "native resolution"
+    print(f"\nTraining {model_type_str} on {device}")
+    print(f"  Params:      {total_params:,}")
+    print(f"  Keypoints:   {args.num_keypoints}")
+    print(f"  Train:       {len(train_ds):,} frames | Val: {len(val_ds):,} frames")
+    print(f"  Input size:  {input_desc}")
+    print(f"  Batch size:  {args.batch_size} | LR: {args.lr} | AMP: {args.amp}")
+    print(f"  Checkpoint:  {os.path.join(args.checkpoint_dir, args.checkpoint_name)}")
     print()
 
     # ── Training loop ─────────────────────────────────────────────────────────
     print("Starting training loop...", flush=True)
     for epoch in range(start_epoch, args.epochs):
         print(f"Epoch {epoch+1} starting...", flush=True)
-        train_loss, train_px = train_epoch(model, train_loader, optimizer, device, scaler)
-        val_loss,   val_px   = val_epoch(model, val_loader, device)
+        train_loss, train_px = train_epoch(
+            model, train_loader, optimizer, device, scaler, is_heatmap=is_heatmap)
+        val_loss,   val_px   = val_epoch(
+            model, val_loader, device, is_heatmap=is_heatmap)
 
         scheduler.step(val_loss)
 
@@ -359,9 +419,10 @@ def main():
                 'val_px_error':         val_px,
                 # Embed 3D keypoints so inference.py can load them without extra config
                 'keypoints_3d':         KEYPOINTS_3D,
-                'model_type':           'KeypointPoseNet',
-                # Embed input size so inference.py resizes frames to match training
-                'input_size':           [in_h, in_w],
+                'model_type':           model_type_str,
+                'num_keypoints':        args.num_keypoints,
+                # Embed input size — None means native resolution of preprocessed dir
+                'input_size':           [in_h, in_w] if in_h else None,
             }, ckpt_path)
             marker = " ✓ BEST"
         else:
@@ -384,10 +445,17 @@ def main():
     print(f"Best val loss: {best_val_loss:.4f}")
     print(f"Checkpoint:    {os.path.join(args.checkpoint_dir, args.checkpoint_name)}")
     print()
-    print("Decision gate for 3D keypoint correctness:")
-    print(f"  val px < 15 px  → keypoints accurate, submit PnP result")
-    print(f"  val px 15-30 px → marginal — compare PnP submission vs CNN+GRU")
-    print(f"  val px > 30 px  → poor regression — check KEYPOINTS_3D dimensions")
+    if is_heatmap:
+        print("Decision gates (heatmap model):")
+        print(f"  val px < 20 px  → excellent — PnP submission should beat CNN+GRU")
+        print(f"  val px 20-40 px → good — try Stage 2 (full res + 14 keypoints)")
+        print(f"  val px 40-80 px → marginal — check sigma (try 1.5 or 3.0)")
+        print(f"  val px > 80 px  → bug — verify Gaussian target generation")
+    else:
+        print("Decision gates (direct regression model):")
+        print(f"  val px < 20 px  → accurate — submit PnP result")
+        print(f"  val px 20-50 px → marginal — compare vs CNN+GRU baseline")
+        print(f"  val px > 80 px  → poor — switch to --model-type heatmap")
 
 
 if __name__ == '__main__':

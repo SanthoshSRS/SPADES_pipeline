@@ -21,6 +21,7 @@ from src.data.event_representations import SignedVoxelGridGenerator, ThreeChanne
 from src.models.cnn_lstm_voxel import DirectPoseCNN
 from src.models.domain_adaptive_pose_net import DomainAdaptivePoseNet
 from src.models.keypoint_net import KeypointPoseNet
+from src.models.keypoint_heatmap_net import KeypointHeatmapNet, soft_argmax_2d
 
 
 def parse_args():
@@ -113,22 +114,28 @@ def predict_pnp(
     timestamp_scale: float,
     keypoints_3d: np.ndarray,
     input_size: tuple = None,
+    is_heatmap_model: bool = False,
 ) -> np.ndarray:
     """
     Predict poses using CNN keypoint regression + PnP solver.
 
-    The model predicts 8 × (u,v) normalized [0,1] for each event frame.
-    cv2.solvePnP uses the known 3D body-frame keypoints and camera intrinsics
+    Supports both model types:
+      KeypointHeatmapNet — model.predict_coords() returns (1, K, 2) via soft-argmax
+      KeypointPoseNet    — model() returns (1, K*2) flat vector
+
+    cv2.solvePnPRansac uses the known 3D body-frame keypoints and camera intrinsics
     to solve for 6-DoF pose geometrically.
 
     Args:
-        model:          KeypointPoseNet
-        events:         Event dictionary from load_h5_data
-        timestamps:     Array of pose timestamps (in raw units before scale)
-        event_generator: ThreeChannelEventFrame instance
-        device:         Inference device
-        timestamp_scale: Multiply timestamps by this before generating event frames
-        keypoints_3d:   (8, 3) float64 — 3D keypoints in satellite body frame (meters)
+        model:            KeypointHeatmapNet or KeypointPoseNet
+        events:           Event dictionary from load_h5_data
+        timestamps:       Array of pose timestamps (in raw units before scale)
+        event_generator:  ThreeChannelEventFrame instance
+        device:           Inference device
+        timestamp_scale:  Multiply timestamps by this before generating event frames
+        keypoints_3d:     (K, 3) float64 — 3D keypoints in satellite body frame (meters)
+        input_size:       Optional (H, W) to resize frames before inference
+        is_heatmap_model: True for KeypointHeatmapNet (uses soft-argmax internally)
 
     Returns:
         predictions: (num_timestamps, 7) [Tx, Ty, Tz, Qw, Qx, Qy, Qz]
@@ -162,10 +169,17 @@ def predict_pnp(
             if input_size is not None:
                 frame_t = F.interpolate(frame_t, size=input_size, mode='bilinear', align_corners=False)
             frame_t = frame_t.to(device)
-            kp_norm = model(frame_t).cpu().numpy().reshape(8, 2)   # normalized [0,1]
+
+            if is_heatmap_model:
+                # soft-argmax over heatmaps → (1, K, 2) normalized [0,1]
+                kp_norm = model.predict_coords(frame_t).squeeze(0).cpu().numpy()
+            else:
+                K = len(keypoints_3d)
+                kp_norm = model(frame_t).cpu().numpy().reshape(K, 2)
 
             # Back to pixel coordinates
-            kp_px = kp_norm * np.array([[1280.0, 720.0]])   # (8, 2)
+            K = len(keypoints_3d)
+            kp_px = kp_norm * np.array([[1280.0, 720.0]])   # (K, 2)
             kp_px_cv = kp_px.reshape(-1, 1, 2).astype(np.float64)
 
             # PnP solve
@@ -363,12 +377,27 @@ def main():
     num_input_channels = config.get('model', {}).get('num_input_channels', 3)
     backbone = config.get('model', {}).get('backbone', 'resnet18')
 
-    # Auto-detect model type from checkpoint state dict keys
-    state_keys  = checkpoint['model_state_dict'].keys()
-    is_keypoint = any(k.startswith('kp_head.') for k in state_keys)
+    # Auto-detect model type — prefer explicit 'model_type' key in checkpoint,
+    # fall back to state-dict key inspection for older checkpoints.
+    ckpt_model_type = checkpoint.get('model_type', None)
+    num_keypoints   = checkpoint.get('num_keypoints', 8)
+    state_keys      = checkpoint['model_state_dict'].keys()
+
+    is_heatmap  = (ckpt_model_type == 'KeypointHeatmapNet') or \
+                  any(k.startswith('decoder.') for k in state_keys)
+    is_keypoint = is_heatmap or \
+                  (ckpt_model_type == 'KeypointPoseNet') or \
+                  any(k.startswith('kp_head.') for k in state_keys)
     is_dann     = (not is_keypoint) and any(k.startswith('gru.') for k in state_keys)
 
-    if is_keypoint:
+    if is_heatmap:
+        model = KeypointHeatmapNet(
+            num_keypoints      = num_keypoints,
+            num_input_channels = num_input_channels,
+            pretrained_backbone= False,
+        )
+        model_type = "KeypointHeatmapNet"
+    elif is_keypoint:
         model = KeypointPoseNet(
             num_input_channels=num_input_channels,
             dropout=config.get('model', {}).get('dropout', 0.2),
@@ -476,7 +505,7 @@ def main():
             keypoints_3d = checkpoint.get('keypoints_3d', None)
             if keypoints_3d is None:
                 raise RuntimeError(
-                    "KeypointPoseNet checkpoint missing 'keypoints_3d' — "
+                    f"{model_type} checkpoint missing 'keypoints_3d' — "
                     "retrain with train_keypoints.py (it embeds them automatically)."
                 )
             ckpt_input_size = checkpoint.get('input_size', None)
@@ -487,6 +516,7 @@ def main():
                 event_generator, device, args.test_timestamp_scale,
                 keypoints_3d=keypoints_3d,
                 input_size=ckpt_input_size,
+                is_heatmap_model=is_heatmap,
             )
         elif seq_len_ckpt == 1:
             predictions = predict_frame_by_frame(
