@@ -26,11 +26,11 @@ loss:
   lambda_rotation: 5.0   # balanced — was 10.0 (too aggressive for rotation)
   
 training:
-  batch_size: 32         # A100-80GB easily fits batch 32 with AMP; was 16
+  batch_size: 16         # proven stable on this server at native 720×1280 res
   num_epochs: 100
-  learning_rate: 0.0001    # linear scaling: 5e-5 × (32/16) = 1e-4
+  learning_rate: 0.00005  # 5e-5 for batch 16
   weight_decay: 0.00001
-  num_workers: 16        # 16w × prefetch_factor=2 × 3.5GB/batch = ~112GB RAM ceiling
+  num_workers: 16
   
   # Learning rate scheduler
   scheduler_factor: 0.5
