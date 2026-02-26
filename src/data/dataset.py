@@ -1,3 +1,15 @@
+# GaussianVoxelNoise augmentation
+import numpy as np
+
+class GaussianVoxelNoise:
+    """Additive Gaussian noise to all voxel channels."""
+    def __init__(self, std: float = 0.02, prob: float = 0.5):
+        self.std = std
+        self.prob = prob
+    def __call__(self, voxels, poses):
+        if np.random.random() < self.prob:
+            voxels = voxels + np.random.randn(*voxels.shape).astype(np.float32) * self.std
+        return voxels, poses
 """
 SPADES Dataset class for loading event sequences and generating voxel grids.
 """

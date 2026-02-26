@@ -18,6 +18,7 @@ from typing import Dict
 from src.data.dataset import (SPADESVoxelDataset, DomainVoxelDataset, train_val_split,
                                ComposeTransforms, RandomIntensityScale, RandomFrameDropout,
                                SaltPepperNoise, RandomErasing)
+from src.data.dataset import GaussianVoxelNoise
 from src.data.event_representations import SignedVoxelGridGenerator, ThreeChannelEventFrame
 from src.models.cnn_lstm_voxel import DirectPoseCNN, count_parameters
 from src.models.domain_adaptive_pose_net import DomainAdaptivePoseNet
@@ -98,6 +99,8 @@ def create_dataloaders(config: Dict, device: str, preprocessed_dir: str = None):
         RandomFrameDropout(drop_prob=0.1),
         SaltPepperNoise(amount=0.02, prob=0.7),  # Simulate hot/dead pixels
         RandomErasing(prob=0.5, scale_range=(0.1, 0.3))  # Simulate dropped packets
+        ),
+        GaussianVoxelNoise(std=0.02, prob=0.5),   # ADD
     ])
     
     # Create datasets
