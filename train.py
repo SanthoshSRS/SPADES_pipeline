@@ -565,4 +565,8 @@ def main():
 
 
 if __name__ == "__main__":
+    # Use file-system sharing instead of /dev/shm — shared HPC nodes often have
+    # /dev/shm nearly full from other jobs, crashing DataLoader workers immediately.
+    import torch.multiprocessing as tmp
+    tmp.set_sharing_strategy('file_system')
     main()
