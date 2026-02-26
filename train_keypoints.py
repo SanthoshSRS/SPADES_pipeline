@@ -181,21 +181,27 @@ def main():
     all_ids    = select_stratified_subset(total_sequences=300, subset_pct=subset_pct)
     train_ids, val_ids = train_val_split(all_ids, val_ratio=0.1)
 
-    # Resize is done on the GPU inside train_epoch/val_epoch — workers return
-    # raw 720×1280 voxels (I/O-bound only, no CPU compute in workers).
+    # Resize on CPU in workers: sends 1.4MB/frame over PCIe instead of 11MB/frame.
+    # fork start method means local functions are picklable — no forkserver issue.
     in_h, in_w = args.input_size
+    def resize_voxel(voxel):
+        t = torch.from_numpy(np.array(voxel, dtype=np.float32)).unsqueeze(0)
+        t = F.interpolate(t, size=(in_h, in_w), mode='bilinear', align_corners=False)
+        return t.squeeze(0).numpy()
 
     train_ds = KeypointDataset(
         preprocessed_dir   = args.preprocessed_dir,
         keypoint_label_dir = args.keypoint_label_dir,
         sequence_ids       = train_ids,
         min_visible        = args.min_visible,
+        transform          = resize_voxel,
     )
     val_ds = KeypointDataset(
         preprocessed_dir   = args.preprocessed_dir,
         keypoint_label_dir = args.keypoint_label_dir,
         sequence_ids       = val_ids,
         min_visible        = args.min_visible,
+        transform          = resize_voxel,
     )
 
     # Use fork (default) + open/close h5 per __getitem__ — same pattern as
@@ -249,10 +255,8 @@ def main():
     print("Starting training loop...", flush=True)
     for epoch in range(start_epoch, args.epochs):
         print(f"Epoch {epoch+1} starting...", flush=True)
-        train_loss, train_px = train_epoch(model, train_loader, optimizer, device, scaler,
-                                           resize_size=(in_h, in_w))
-        val_loss,   val_px   = val_epoch(model, val_loader, device,
-                                         resize_size=(in_h, in_w))
+        train_loss, train_px = train_epoch(model, train_loader, optimizer, device, scaler)
+        val_loss,   val_px   = val_epoch(model, val_loader, device)
 
         scheduler.step(val_loss)
 
