@@ -129,11 +129,12 @@ class DomainAdaptivePoseNet(nn.Module):
         """
         batch, seq_len, C, H, W = voxel_seq.shape
 
-        # Process each frame through CNN
-        features = torch.stack(
-            [self.forward_cnn(voxel_seq[:, t]) for t in range(seq_len)],
-            dim=1
-        )  # (batch, seq_len, feature_dim)
+        # Process ALL frames in one CNN pass — eliminates the Python loop and lets
+        # the GPU saturate on one large (batch*seq_len, C, H, W) forward instead of
+        # seq_len separate (batch, C, H, W) passes.
+        features = self.forward_cnn(
+            voxel_seq.reshape(batch * seq_len, C, H, W)
+        ).reshape(batch, seq_len, self.feature_dim)  # (batch, seq_len, feature_dim)
 
         gru_out, _ = self.gru(features)  # (batch, seq_len, hidden_dim)
         last_out = gru_out[:, -1]        # use last timestep only

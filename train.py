@@ -194,7 +194,7 @@ def train_epoch(
     num_batches = 0
 
     # DANN: cycle over real test voxels alongside synthetic training batches
-    domain_iter = iter(dann_loader) if dann_loader is not None else None
+    domain_iter = iter(dann_loader) if (dann_loader is not None and lambda_domain > 0) else None
     domain_criterion = nn.CrossEntropyLoss()
 
     for batch_idx, (voxels, poses) in enumerate(dataloader):
@@ -353,7 +353,8 @@ def main():
     if device.type == 'cuda':
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.backends.cudnn.allow_tf32 = True
-        print("Enabled TF32 for Ampere GPU acceleration")
+        torch.backends.cudnn.benchmark = True  # auto-tune cuDNN kernels for fixed input sizes
+        print("Enabled TF32 + cudnn.benchmark for Ampere GPU acceleration")
     
     # Set random seed
     torch.manual_seed(config['seed'])
@@ -381,8 +382,9 @@ def main():
             dann_dataset,
             batch_size=config['training']['batch_size'],
             shuffle=True,
-            num_workers=config['training']['num_workers'],
-            pin_memory=(args.device == 'cuda'),
+            num_workers=2,        # 2 workers — minimal footprint alongside 16 train workers
+            prefetch_factor=1,    # 2 batches queued total (2w×1) — ~3.5 GB vs 28 GB at default
+            pin_memory=False,     # don't pin domain data at native 720×1280 res
         )
         print(f"DANN domain loader: {len(dann_loader)} batches from {args.dann_test_dir}")
 
@@ -411,6 +413,14 @@ def main():
     num_params = count_parameters(model)
     print(f"Model: {model_name}")
     print(f"Model parameters: {num_params:,}")
+
+    # Compile model for ~20-30% additional throughput on A100
+    if device.type == 'cuda':
+        try:
+            model = torch.compile(model)
+            print("torch.compile() applied")
+        except Exception as e:
+            print(f"torch.compile() skipped: {e}")
     
     # Create loss
     criterion = CompositePoseLoss(
@@ -456,6 +466,9 @@ def main():
         model.load_state_dict(checkpoint['model_state_dict'])
         if 'optimizer_state_dict' in checkpoint:
             optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+            # Override lr from current config (handles batch-size changes between runs)
+            for pg in optimizer.param_groups:
+                pg['lr'] = config['training']['learning_rate']
         else:
             print("  Warning: optimizer state not in checkpoint, starting optimizer fresh")
         if 'scheduler_state_dict' in checkpoint:

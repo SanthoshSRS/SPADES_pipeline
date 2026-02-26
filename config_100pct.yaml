@@ -26,11 +26,11 @@ loss:
   lambda_rotation: 5.0   # balanced — was 10.0 (too aggressive for rotation)
   
 training:
-  batch_size: 16         # resnet18 frees VRAM; was 8
+  batch_size: 32         # A100-80GB easily fits batch 32 with AMP; was 16
   num_epochs: 100
-  learning_rate: 0.00005   # scaled with batch size (was 2.5e-5 for batch 8)
-  weight_decay: 0.00001  
-  num_workers: 16        # Increased from 8 to feed the A100 faster
+  learning_rate: 0.0001    # linear scaling: 5e-5 × (32/16) = 1e-4
+  weight_decay: 0.00001
+  num_workers: 20        # slightly more workers to feed larger batches
   
   # Learning rate scheduler
   scheduler_factor: 0.5
