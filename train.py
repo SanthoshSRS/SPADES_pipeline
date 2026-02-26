@@ -476,15 +476,6 @@ def main():
     else:
         epochs_without_improvement = 0
 
-    # Compile AFTER checkpoint load — torch.compile wraps model in OptimizedModule
-    # which changes state_dict key names, breaking load_state_dict on old checkpoints
-    if device.type == 'cuda':
-        try:
-            model = torch.compile(model)
-            print("torch.compile() applied")
-        except Exception as e:
-            print(f"torch.compile() skipped: {e}")
-
     # Training loop
     print(f"\nStarting training for {config['training']['num_epochs']} epochs...")
     
@@ -574,4 +565,6 @@ def main():
 
 
 if __name__ == "__main__":
+    import multiprocessing
+    multiprocessing.set_start_method('fork', force=True)
     main()
