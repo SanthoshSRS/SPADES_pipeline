@@ -415,13 +415,6 @@ def main():
     print(f"Model parameters: {num_params:,}")
 
     # Compile model for ~20-30% additional throughput on A100
-    if device.type == 'cuda':
-        try:
-            model = torch.compile(model)
-            print("torch.compile() applied")
-        except Exception as e:
-            print(f"torch.compile() skipped: {e}")
-    
     # Create loss
     criterion = CompositePoseLoss(
         lambda_translation=config['loss']['lambda_translation'],
@@ -482,6 +475,15 @@ def main():
               f"patience_counter={epochs_without_improvement}")
     else:
         epochs_without_improvement = 0
+
+    # Compile AFTER checkpoint load — torch.compile wraps model in OptimizedModule
+    # which changes state_dict key names, breaking load_state_dict on old checkpoints
+    if device.type == 'cuda':
+        try:
+            model = torch.compile(model)
+            print("torch.compile() applied")
+        except Exception as e:
+            print(f"torch.compile() skipped: {e}")
 
     # Training loop
     print(f"\nStarting training for {config['training']['num_epochs']} epochs...")
