@@ -19,16 +19,16 @@ model:
   sequence_length: 10  # CNN+GRU temporal model (1 second at 10 Hz)
   dropout: 0.2
   pretrained_backbone: true
-  backbone: "resnet50"  # "resnet18" for faster training, "resnet50" for better accuracy
+  backbone: "resnet18"  # resnet18: ~4x faster per frame, allows larger batch at native res
   
 loss:
   lambda_translation: 1.0
-  lambda_rotation: 10.0  # balance rotation vs translation gradient magnitudes
+  lambda_rotation: 5.0   # balanced — was 10.0 (too aggressive for rotation)
   
 training:
-  batch_size: 8          # seq_len=10 OOMs at 16; halved to 8
+  batch_size: 16         # resnet18 frees VRAM; was 8
   num_epochs: 100
-  learning_rate: 0.000025  # linear scale with batch: 64->16, /4 from 1e-4
+  learning_rate: 0.00005   # scaled with batch size (was 2.5e-5 for batch 8)
   weight_decay: 0.00001  
   num_workers: 16        # Increased from 8 to feed the A100 faster
   

@@ -223,7 +223,7 @@ def train_epoch(
                         real_voxels = next(domain_iter).to(device)
                     _, _, real_domain_logits = _model_forward(model, real_voxels)
                     real_labels = torch.ones(real_voxels.size(0), dtype=torch.long, device=device)
-                    d_loss = d_loss + domain_criterion(real_domain_logits, real_labels)
+                    d_loss = (d_loss + domain_criterion(real_domain_logits, real_labels)) / 2.0
                     loss = loss + lambda_domain * d_loss
             scaler.scale(loss).backward()
             scaler.unscale_(optimizer)
@@ -245,7 +245,7 @@ def train_epoch(
                     real_voxels = next(domain_iter).to(device)
                 _, _, real_domain_logits = _model_forward(model, real_voxels)
                 real_labels = torch.ones(real_voxels.size(0), dtype=torch.long, device=device)
-                d_loss = d_loss + domain_criterion(real_domain_logits, real_labels)
+                d_loss = (d_loss + domain_criterion(real_domain_logits, real_labels)) / 2.0
                 loss = loss + lambda_domain * d_loss
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
