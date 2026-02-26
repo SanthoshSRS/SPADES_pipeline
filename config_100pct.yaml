@@ -30,7 +30,7 @@ training:
   num_epochs: 100
   learning_rate: 0.0001    # linear scaling: 5e-5 × (32/16) = 1e-4
   weight_decay: 0.00001
-  num_workers: 20        # slightly more workers to feed larger batches
+  num_workers: 16        # 16w × prefetch_factor=2 × 3.5GB/batch = ~112GB RAM ceiling
   
   # Learning rate scheduler
   scheduler_factor: 0.5

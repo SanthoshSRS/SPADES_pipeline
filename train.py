@@ -130,17 +130,17 @@ def create_dataloaders(config: Dict, device: str, preprocessed_dir: str = None):
         shuffle=True,
         num_workers=config['training']['num_workers'],
         pin_memory=(device == 'cuda'),
-        prefetch_factor=4,  # Load 4 batches ahead per worker
+        prefetch_factor=2,  # 2 batches/worker: batch_size=32 → 16w×2×3.5GB=112GB vs 280GB at 4
         persistent_workers=True  # Keep workers alive between epochs
     )
-    
+
     val_loader = DataLoader(
         val_dataset,
         batch_size=config['training']['batch_size'],
         shuffle=False,
         num_workers=config['training']['num_workers'],
         pin_memory=(device == 'cuda'),
-        prefetch_factor=4,
+        prefetch_factor=2,
         persistent_workers=True
     )
     
