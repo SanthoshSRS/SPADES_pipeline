@@ -16,28 +16,28 @@ data:
   
 model:
   num_input_channels: 3  # 3-channel exponential decay
-  sequence_length: 1  # DirectPoseCNN, no GRU
+  sequence_length: 10  # DomainAdaptivePoseNet (CNN+GRU), seq=10
   dropout: 0.2
   pretrained_backbone: true
-  backbone: "resnet50"  # resnet50: more capacity, fits easily at seq=1
-  
+  backbone: "resnet18"
+
 loss:
   lambda_translation: 1.0
-  lambda_rotation: 10.0   # rotation is the bigger problem; push harder
-  
+  lambda_rotation: 5.0
+
 training:
-  batch_size: 64         # safe at seq=1 native res; 4× more stable gradients
+  batch_size: 16
   num_epochs: 100
-  learning_rate: 0.0002  # linear scale: 5e-5 × (64/16) = 2e-4
+  learning_rate: 0.00005
   weight_decay: 0.00001
   num_workers: 0         # 0 = synchronous loading, no workers, no /dev/shm — avoids all IPC crashes
-  
+
   # Learning rate scheduler
   scheduler_factor: 0.5
-  scheduler_patience: 15  # more patience for larger-batch training
-  
+  scheduler_patience: 10
+
   # Early stopping
-  early_stopping_patience: 30  # Stop if no improvement for 30 epochs
+  early_stopping_patience: 20
   
 logging:
   checkpoint_dir: "checkpoints"
