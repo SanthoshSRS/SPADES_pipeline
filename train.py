@@ -98,9 +98,8 @@ def create_dataloaders(config: Dict, device: str, preprocessed_dir: str = None):
         RandomIntensityScale(scale_range=(0.8, 1.2)),
         RandomFrameDropout(drop_prob=0.1),
         SaltPepperNoise(amount=0.02, prob=0.7),  # Simulate hot/dead pixels
-        RandomErasing(prob=0.5, scale_range=(0.1, 0.3))  # Simulate dropped packets
-        ),
-        GaussianVoxelNoise(std=0.02, prob=0.5),   # ADD
+        RandomErasing(prob=0.5, scale_range=(0.1, 0.3)),  # Simulate dropped packets
+        GaussianVoxelNoise(std=0.02, prob=0.5),
     ])
     
     # Create datasets
