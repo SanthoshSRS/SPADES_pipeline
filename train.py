@@ -249,7 +249,8 @@ def train_epoch(
     """Train for one epoch with optional mixed precision (AMP)."""
     model.train()
     metrics_tracker = MetricsTracker()
-    dataloader = ThreadPrefetcher(dataloader, num_threads=16, buffer_size=16)  # parallel h5 I/O threads
+    if dataloader.num_workers == 0:
+        dataloader = ThreadPrefetcher(dataloader, num_threads=16, buffer_size=16)
 
     total_loss = 0.0
     total_trans_loss = 0.0
@@ -355,13 +356,14 @@ def validate(
     """Validate model."""
     model.eval()
     metrics_tracker = MetricsTracker()
-    dataloader = ThreadPrefetcher(dataloader, num_threads=16, buffer_size=16)
+    if dataloader.num_workers == 0:
+        dataloader = ThreadPrefetcher(dataloader, num_threads=16, buffer_size=16)
 
     total_loss = 0.0
     total_trans_loss = 0.0
     total_rot_loss = 0.0
     num_batches = 0
-    
+
     with torch.no_grad():
         for voxels, poses in dataloader:
             voxels = voxels.to(device)

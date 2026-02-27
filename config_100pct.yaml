@@ -30,7 +30,7 @@ training:
   num_epochs: 100
   learning_rate: 0.00005
   weight_decay: 0.00001
-  num_workers: 0         # 0 = synchronous loading, no workers, no /dev/shm — avoids all IPC crashes
+  num_workers: 8         # sg236 has 252G /dev/shm free — real workers safe here
 
   # Learning rate scheduler
   scheduler_factor: 0.5
