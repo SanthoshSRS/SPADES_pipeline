@@ -250,7 +250,7 @@ def train_epoch(
     """Train for one epoch with optional mixed precision (AMP)."""
     model.train()
     metrics_tracker = MetricsTracker()
-    dataloader = ThreadPrefetcher(dataloader, num_threads=4, buffer_size=8)  # parallel h5 I/O threads
+    dataloader = ThreadPrefetcher(dataloader, num_threads=16, buffer_size=16)  # parallel h5 I/O threads
 
     total_loss = 0.0
     total_trans_loss = 0.0
@@ -356,7 +356,7 @@ def validate(
     """Validate model."""
     model.eval()
     metrics_tracker = MetricsTracker()
-    dataloader = ThreadPrefetcher(dataloader, num_threads=4, buffer_size=8)
+    dataloader = ThreadPrefetcher(dataloader, num_threads=16, buffer_size=16)
 
     total_loss = 0.0
     total_trans_loss = 0.0
