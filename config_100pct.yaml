@@ -17,7 +17,7 @@ data:
 model:
   num_input_channels: 3  # 3-channel exponential decay
   sequence_length: 10  # DomainAdaptivePoseNet (CNN+GRU), seq=10
-  dropout: 0.2
+  dropout: 0.4
   pretrained_backbone: true
   backbone: "resnet18"
 
@@ -27,9 +27,9 @@ loss:
 
 training:
   batch_size: 16
-  num_epochs: 100
-  learning_rate: 0.00005
-  weight_decay: 0.00001
+  num_epochs: 50
+  learning_rate: 0.000005
+  weight_decay: 0.0001
   num_workers: 8         # sg236 has 252G /dev/shm free — real workers safe here
 
   # Learning rate scheduler
@@ -37,7 +37,7 @@ training:
   scheduler_patience: 10
 
   # Early stopping
-  early_stopping_patience: 20
+  early_stopping_patience: 15
   
 logging:
   checkpoint_dir: "checkpoints"
