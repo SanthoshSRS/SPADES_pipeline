@@ -22,13 +22,13 @@ model:
   backbone: "resnet18"
 
 loss:
-  lambda_translation: 2.0   # was 1.0 — stronger signal to translation head
-  lambda_rotation: 1.0      # was 5.0 — stop overwhelming translation
+  lambda_translation: 0.0   # frozen translation head — skip translation loss entirely
+  lambda_rotation: 1.0      # pure rotation focus
 
 training:
   batch_size: 16
-  num_epochs: 30
-  learning_rate: 0.00001    # slightly higher than fine-tune run (5e-6 → 1e-5)
+  num_epochs: 20
+  learning_rate: 0.000003   # very low — backbone barely moves to preserve translation
   weight_decay: 0.0001
   num_workers: 8         # sg236 has 252G /dev/shm free — real workers safe here
 

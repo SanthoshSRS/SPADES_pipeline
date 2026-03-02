@@ -44,6 +44,8 @@ def parse_args():
     parser.add_argument('--preprocessed-dir', type=str, default=None,
                         help='Directory with preprocessed voxel H5 files. '
                              'Defaults to preprocessed_voxels_<data-subset>.')
+    parser.add_argument('--freeze-translation', action='store_true',
+                        help='Freeze translation head — train backbone + rotation head only')
     parser.add_argument('--dann', action='store_true',
                         help='Enable DANN domain adaptation (requires sequence_length > 1)')
     parser.add_argument('--dann-test-dir', type=str, default=None,
@@ -540,6 +542,23 @@ def main():
               f"patience_counter={epochs_without_improvement}")
     else:
         epochs_without_improvement = 0
+
+    # Freeze translation head if requested — lock in current translation performance
+    # and focus all gradient signal on rotation improvement
+    if args.freeze_translation:
+        for param in model.translation_head.parameters():
+            param.requires_grad = False
+        print("\n  Translation head FROZEN — only backbone + rotation head will train")
+        # Rebuild optimizer with only trainable parameters (fresh state)
+        optimizer = torch.optim.AdamW(
+            filter(lambda p: p.requires_grad, model.parameters()),
+            lr=config['training']['learning_rate'],
+            weight_decay=config['training']['weight_decay']
+        )
+        # Reset patience counters so rotation-focused training gets a clean run
+        best_val_loss = float('inf')
+        epochs_without_improvement = 0
+        print(f"  Optimizer rebuilt with {sum(p.numel() for p in model.parameters() if p.requires_grad):,} trainable params")
 
     # Training loop
     print(f"\nStarting training for {config['training']['num_epochs']} epochs...")
