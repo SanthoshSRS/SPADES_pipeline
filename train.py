@@ -560,10 +560,15 @@ def main():
         epochs_without_improvement = 0
         print(f"  Optimizer rebuilt with {sum(p.numel() for p in model.parameters() if p.requires_grad):,} trainable params")
 
-    # Training loop
-    print(f"\nStarting training for {config['training']['num_epochs']} epochs...")
-    
-    total_epochs = config['training']['num_epochs']
+    # Training loop — num_epochs is treated as additional epochs from start_epoch
+    # when resuming, so total = start_epoch + num_epochs
+    additional_epochs = config['training']['num_epochs']
+    total_epochs = start_epoch + additional_epochs
+    best_path = os.path.join(config['logging']['checkpoint_dir'],
+                             f"{args.data_subset}_best.pth")
+    print(f"\nStarting training for {additional_epochs} epochs "
+          f"(epochs {start_epoch+1}–{total_epochs})...")
+
     for epoch in range(start_epoch, total_epochs):
         print(f"\nEpoch {epoch+1}/{total_epochs}")
 
