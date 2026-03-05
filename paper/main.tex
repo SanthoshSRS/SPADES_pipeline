@@ -1,0 +1,584 @@
+\documentclass[10pt,twocolumn,letterpaper]{article}
+
+% -----------------------------------------------------------------------
+% SPARKS Workshop @ CVPR 2026
+% cvpr.sty already provides: times, xcolor, graphicx, amsmath, amssymb,
+%   booktabs, natbib, enumitem, cleveref — do NOT reload them.
+% -----------------------------------------------------------------------
+\usepackage[pagebackref]{hyperref}  % must come BEFORE cvpr
+\usepackage[review]{cvpr}           % review = line numbers + CVPR header
+\usepackage{multirow}               % not in cvpr.sty
+\usepackage{microtype}              % not in cvpr.sty
+
+% Required by cvpr.sty for header/watermark (use any placeholder values)
+\def\confName{SPARKS@CVPR}
+\def\paperID{XXXX}
+
+% -----------------------------------------------------------------------
+\begin{document}
+
+\title{Event-Driven Spacecraft Pose Estimation via\\
+CNN Direct Regression from Voxel Grids}
+
+\author{Santhosh S R S \quad Kashyap Hegde Kota \quad
+        Pruthvi Janga \quad Bharatesh Chakravarthi \\
+        \small{Arizona State University} \\
+        \texttt{\{ssrs1, kkota3, pjanga, bshettah\}@asu.edu}
+}
+
+\maketitle
+
+% -----------------------------------------------------------------------
+\begin{abstract}
+We present a deep learning pipeline for 6-DoF spacecraft pose estimation
+from event-camera data, developed for the SPARKS Challenge at CVPR 2026.
+Given a stream of asynchronous events from a 1280$\times$720 neuromorphic
+camera, we convert each 100\,ms event window into a compact 3-channel
+exponential-decay voxel grid and regress pose directly using a
+ResNet-50 backbone with dual translation and rotation heads.
+Rotation is supervised with geodesic distance on SO(3) rather
+than Euclidean quaternion loss.  We compare three architectural
+variants—a frame-by-frame CNN, a CNN+GRU temporal model, and a
+heatmap-based keypoint regressor with PnP—on the SPADES dataset
+(300 synthetic training sequences, 31 real test sequences).
+Our best submission achieves a composite pose error of \textbf{2.063}
+(translation 0.4105, orientation 1.6526\,rad) on the final leaderboard.
+Analysis reveals that the synthetic-to-real domain gap, driven
+primarily by a 100$\times$ timestamp-unit mismatch between training
+and test data, is the dominant performance bottleneck, and that
+single-frame prediction outperforms temporal modelling at the
+10\,Hz pose sampling rate used in this dataset.
+\end{abstract}
+
+% -----------------------------------------------------------------------
+\section{Introduction}
+\label{sec:intro}
+
+Accurate knowledge of a spacecraft's pose—position and orientation
+relative to a camera—is essential for autonomous rendezvous, proximity
+operations, and on-orbit servicing.  Traditional frame-based cameras
+suffer from motion blur and limited dynamic range in the high-contrast
+conditions of space, motivating the use of \emph{event cameras}
+\cite{gallego2020event}.  Event cameras report per-pixel brightness
+changes asynchronously with microsecond temporal resolution, offering
+high dynamic range, low latency, and low power consumption.  These
+properties are well suited to the rapid rotational motions and extreme
+illumination conditions encountered in orbit.
+
+The SPARKS challenge \cite{sparks2026} provides the SPADES dataset:
+300 photorealistic synthetic training sequences rendered with event-camera
+simulation, paired with 31 real event-camera recordings of a Proba-2
+spacecraft mockup.  The task is to predict the 6-DoF pose (translation
+$\mathbf{t}\in\mathbb{R}^{3}$ and unit quaternion
+$\mathbf{q}\in\mathbb{H}$) at 10\,Hz from the raw event stream.
+
+We develop an end-to-end CNN pipeline and explore three directions:
+\begin{enumerate}
+  \item \textbf{Frame-by-frame regression}: A ResNet-50 backbone with
+        dual regression heads trained on 3-channel event voxel grids.
+  \item \textbf{Temporal modelling}: A CNN+GRU network that aggregates
+        context over 10 consecutive frames.
+  \item \textbf{Keypoint + PnP}: A heatmap decoder regressing 2D
+        projections of known 3D spacecraft keypoints, followed by
+        iterative PnP.
+\end{enumerate}
+Our main findings are: (i) frame-by-frame CNN prediction outperforms
+temporal aggregation at 10\,Hz; (ii) rotation error is substantially
+harder to close than translation error across the synthetic-to-real gap;
+and (iii) a 100$\times$ timestamp-unit mismatch between training and test
+data is a key source of domain shift that future work should address explicitly.
+
+% -----------------------------------------------------------------------
+\section{Related Work}
+\label{sec:related}
+
+\paragraph{Event camera representations.}
+Raw events cannot be directly ingested by conventional CNNs.
+Zhu~\etal~\cite{zhu2019unsupervised} introduced the \emph{voxel grid},
+which distributes events into temporal bins via bilinear interpolation,
+preserving both temporal structure and polarity.  Alternative
+representations include time surfaces \cite{lagorce2017hots},
+event frames \cite{rebecq2017real}, and learned event-to-frame
+conversions \cite{rebecq2019events}.  We use a signed voxel grid and
+a three-channel exponential-decay variant that is directly
+compatible with ImageNet-pretrained RGB backbones.
+
+\paragraph{Spacecraft pose estimation.}
+Classical model-based trackers (e.g., IPPE, EPnP) require textured
+CAD models and struggle under event-camera noise.  Deep learning
+approaches for frame-based cameras include direct regression
+\cite{kendall2015posenet} and keypoint-based methods
+\cite{park2019pix2pose,hu2019segmentation}.  The SPEED
+\cite{sharma2019pose} and SPEED+ \cite{park2022speed} datasets
+catalysed learning-based methods for spaceborne pose estimation,
+but use standard cameras.  SPADES \cite{spades2024} is, to our
+knowledge, the first large-scale dataset pairing event cameras
+with 6-DoF spacecraft pose labels.
+
+\paragraph{Loss functions for rotation.}
+Naive $\ell_2$ loss on quaternion components is non-geometric and
+breaks under the double-cover of SO(3).  Geodesic distance,
+$2\arccos(|\hat{\mathbf{q}}\cdot\mathbf{q}|)$, is the natural metric
+on the unit sphere and has been shown to improve convergence for
+rotation regression \cite{mahendran2017so3,peretroukhin2020smooth}.
+We adopt geodesic rotation loss throughout.
+
+\paragraph{Domain adaptation.}
+The DANN framework \cite{ganin2016domain} uses a gradient-reversal
+layer to learn domain-invariant features.  We incorporate DANN into
+our CNN+GRU model to encourage synthetic-to-real transfer.
+
+% -----------------------------------------------------------------------
+\section{Method}
+\label{sec:method}
+
+\begin{figure*}[t]
+  \centering
+  \includegraphics[width=\linewidth]{figure/architecture.png}
+  \caption{Overview of our end-to-end pipeline.  Raw asynchronous events
+  from the event camera are accumulated into a 3-channel exponential-decay
+  voxel grid (or 5-channel signed voxel grid), which is passed through a
+  ResNet-50 backbone.  The resulting feature vector feeds dual regression
+  heads producing a 3-D translation vector and a unit quaternion for
+  orientation.  Figure generated with AI assistance.}
+  \label{fig:architecture}
+\end{figure*}
+
+\subsection{Event Representation}
+\label{sec:repr}
+
+Each pose timestamp $\tau$ is associated with a window of events
+$\mathcal{E}_\tau = \{(x_i, y_i, p_i, t_i)\}$ spanning
+$[\tau - 100\text{\,ms},\,\tau]$, where $x_i,y_i$ are pixel
+coordinates, $p_i\in\{-1,+1\}$ is polarity, and $t_i$ is timestamp.
+
+\paragraph{3-channel exponential decay (our primary representation).}
+We divide the 100\,ms window into three equal sub-windows
+$[w_0, w_1, w_2]$ of $\approx$33\,ms each.  For sub-window $k$ ending
+at $t_k^{\text{end}}$, each event contributes a signed, exponentially
+decaying weight:
+\begin{equation}
+  w_i = p_i \cdot \exp\!\left(-\frac{t_k^{\text{end}} - t_i}{\tau_{\text{decay}}}\right),
+  \quad \tau_{\text{decay}} = 30\text{\,ms}.
+  \label{eq:decay}
+\end{equation}
+Events are accumulated into a spatial grid per sub-window and
+normalised channel-wise as $f(v) = \operatorname{sgn}(v)\log(1+|v|)$.
+The resulting 3-channel tensor is compatible with ImageNet-pretrained
+convolutional kernels.
+
+\paragraph{5-channel signed voxel grid (baseline).}
+Following Zhu~\etal~\cite{zhu2019unsupervised}, we divide the window
+into $B=5$ temporal bins of 20\,ms each and bilinearly interpolate
+each event across adjacent bins:
+\begin{equation}
+  V_k(x, y) = \sum_i p_i \max\!\bigl(0,\, 1 - |t_i^* - k|\bigr)
+               \,\delta(x{-}x_i,\, y{-}y_i),
+\end{equation}
+where $t_i^* = (t_i - t_{\min}) / (t_{\max} - t_{\min}) \cdot (B{-}1)$
+normalises timestamps to $[0,B-1]$.
+
+\subsection{Network Architectures}
+
+\paragraph{DirectPoseCNN (frame-by-frame).}
+\label{sec:directcnn}
+A ResNet-50 \cite{he2016deep} backbone pre-trained on ImageNet1K
+provides the feature extractor.  The first convolutional layer is
+patched to accept $C=3$ (or $C=5$) input channels by averaging the
+pretrained RGB weights and replicating them across the required number
+of channels, preserving the benefit of ImageNet initialisation.
+
+Global average pooling yields a 2048-dimensional feature vector, which
+feeds into two independent regression heads:
+\begin{align}
+  \hat{\mathbf{t}} &= \mathbf{W}_t^{(2)}\,\text{ReLU}(\mathbf{W}_t^{(1)}\mathbf{f} + \mathbf{b}_t^{(1)}) + \mathbf{b}_t^{(2)}, \\
+  \hat{\mathbf{q}} &= \frac{\mathbf{g}(\mathbf{f})}{\|\mathbf{g}(\mathbf{f})\|_2},
+\end{align}
+where $\mathbf{f}\in\mathbb{R}^{2048}$, both intermediate layers have
+128 units with ReLU activations and dropout (rate 0.2), and
+$\mathbf{g}$ maps to 4 units before L2 normalisation enforces
+the unit-quaternion constraint.
+
+\paragraph{DomainAdaptivePoseNet (CNN+GRU).}
+\label{sec:gru}
+To exploit inter-frame context, we extend DirectPoseCNN with a
+one-layer GRU \cite{cho2014gru} of hidden size 512.
+A sequence of $T=10$ consecutive event frames is embedded independently
+by the shared ResNet-50 backbone (the $(B,T,C,H,W)$ tensor is reshaped
+to $(BT,C,H,W)$ for a single forward pass, then reshaped back to
+$(B,T,2048)$).  The GRU processes the sequence and its final hidden
+state feeds the dual regression heads.
+
+Domain adaptation is implemented via a gradient-reversal
+layer \cite{ganin2016domain} inserted before a binary domain
+classifier $\text{FC}(512\to64\to2)$.  The reversal coefficient
+$\lambda$ is annealed from 0 to 1 following a sigmoid schedule
+over training epochs, encouraging the backbone to learn
+domain-invariant features.
+
+\paragraph{KeypointHeatmapNet (keypoint-based, future work).}
+\label{sec:kp}
+Rather than regressing pose directly, this variant regresses 2D
+pixel coordinates of $K=14$ known 3D keypoints on the Proba-2 satellite,
+and recovers pose via PnP.
+Following the SimpleBaseline architecture \cite{xiao2018simple},
+we use the ResNet-50 backbone \emph{without} global average pooling
+(preserving spatial resolution) and attach a three-stage upsampling
+decoder:
+\begin{align*}
+  &\text{ConvTranspose}(2048{\to}256,\;k{=}4,\;s{=}2)^{\times 3} \\
+  &\quad\longrightarrow \text{Conv}(256{\to}K,\;k{=}1).
+\end{align*}
+Each decoder stage is followed by batch normalisation and ReLU.
+The output $(B, K, H/4, W/4)$ heatmap is converted to sub-pixel
+keypoint coordinates via differentiable soft-argmax with temperature
+$\beta=100$.  Gaussian target heatmaps with $\sigma=2$\,px are
+generated from projected ground-truth 3D keypoints.
+
+\subsection{3D Keypoint Definitions}
+\label{sec:keypoints}
+
+We define $K=14$ keypoints on the Proba-2 satellite in its body frame
+(metres):
+\begin{itemize}
+  \item \textbf{8 bounding-box corners}: $[\pm0.80,\;\pm0.30,\;\pm0.52]$
+        — span the full 3D extent for maximum PnP conditioning.
+  \item \textbf{6 face centres}: $[\pm0.80,0,0]$,
+        $[0,\pm0.30,0]$, $[0,0,\pm0.52]$
+        — ensure at least one visible keypoint under most viewpoints.
+\end{itemize}
+Camera intrinsics: $f_x = f_y = 1258.6$, $c_x = 640$, $c_y = 360$
+(no distortion).
+
+\subsection{PnP Pose Solver}
+\label{sec:pnp}
+
+Given predicted 2D keypoints $\{\hat{\mathbf{u}}_k\}$ and the known
+3D coordinates $\{\mathbf{P}_k\}$, we solve for pose using
+\texttt{cv2.solvePnPRansac} with the EPnP initialiser,
+reprojection threshold $\epsilon=8$\,px, and minimum 4 inliers.
+The resulting rotation vector is converted to a unit quaternion
+via \texttt{scipy.spatial.transform.Rotation}.  If PnP fails
+(fewer than 4 inlier correspondences), we fall back to the last
+successfully predicted pose.
+
+\subsection{Loss Functions}
+\label{sec:loss}
+
+\paragraph{Composite pose loss.}
+For the direct regression models we minimise:
+\begin{equation}
+  \mathcal{L} = \lambda_t \cdot \|\hat{\mathbf{t}} - \mathbf{t}\|_2^2
+              + \lambda_r \cdot 2\arccos\!\left(|\hat{\mathbf{q}} \cdot \mathbf{q}|\right),
+  \label{eq:loss}
+\end{equation}
+where the rotation term is the geodesic distance on SO(3).  The
+absolute value of the quaternion dot product handles the
+double-cover of SO(3).  We ablate $\lambda_t$ and $\lambda_r$
+in \cref{sec:ablation}.
+
+\paragraph{Heatmap loss.}
+For KeypointHeatmapNet:
+\begin{equation}
+  \mathcal{L}_{\text{hm}} = \frac{1}{N_{\text{vis}}}
+  \sum_{k=1}^{K} \mathbf{v}_k \cdot
+  \|\hat{H}_k - H_k^*\|_F^2,
+\end{equation}
+where $\mathbf{v}_k\in\{0,1\}$ is the per-keypoint visibility mask,
+$H_k^*$ is the Gaussian target, and $N_{\text{vis}}$ is the count of
+visible keypoints.
+
+\subsection{Training Strategy}
+\label{sec:training}
+
+\paragraph{Two-phase curriculum.}
+We train in two phases.
+\emph{Phase 1} uses a 25\% data subset (75 sequences, 20 epochs) for
+rapid architecture validation; the pass criterion is val.\ translation
+$<10\%$ and rotation $<40°$.
+\emph{Phase 2} fine-tunes on the full 100\% dataset (270 training,
+30 validation sequences) for up to 100 additional epochs, resuming
+from the Phase-1 best checkpoint.
+
+\paragraph{Optimiser and schedule.}
+We use AdamW with weight decay $10^{-4}$, initial learning rate
+$5\times10^{-6}$, gradient clipping at $\|\cdot\|_{\max}=1.0$,
+and \texttt{ReduceLROnPlateau} (factor 0.5, patience 5 epochs).
+Training uses AMP (automatic mixed precision) with gradient scaling.
+Early stopping triggers after 10 epochs without improvement in
+validation loss.
+
+\paragraph{Event-camera augmentations.}
+Standard image augmentations (crop, flip) do not transfer meaningfully
+to event voxel grids.  We design augmentations that simulate
+event-camera failure modes:
+\begin{enumerate}
+  \item \textbf{RandomIntensityScale}: multiply all voxel values
+        by $s \sim \mathcal{U}(0.8, 1.2)$.
+  \item \textbf{RandomFrameDropout}: zero out an entire temporal
+        channel with probability 0.1 (simulates event-rate drops).
+  \item \textbf{SaltPepperNoise}: randomly set 1–2\% of spatial
+        locations to $\pm 1$ (hot/dead pixels), applied with
+        probability 0.7.
+  \item \textbf{RandomErasing}: zero a random rectangle covering
+        10–30\% of the frame area, with probability 0.5
+        (simulates packet loss).
+\end{enumerate}
+No augmentations are applied at validation or inference time.
+
+% -----------------------------------------------------------------------
+\section{Experiments}
+\label{sec:experiments}
+
+\subsection{Dataset and Evaluation}
+\label{sec:dataset}
+
+The SPADES dataset \cite{spades2024} contains 300 synthetic training
+sequences and 31 real test sequences captured with a 1280$\times$720
+Prophesee event camera observing a Proba-2 spacecraft mockup in a
+controlled environment.  Approximately 179\,000 training frames are
+available after preprocessing at the 10\,Hz pose rate.
+We hold out 10\% of training sequences (30 sequences) for validation.
+
+The competition metric is the composite pose error:
+\begin{equation}
+  E = E_t + E_r, \quad
+  E_t = \frac{\|\hat{\mathbf{t}} - \mathbf{t}\|}{\|\mathbf{t}\|}, \quad
+  E_r = 2\arccos(|\hat{\mathbf{q}} \cdot \mathbf{q}|)\;\text{[rad]},
+\end{equation}
+evaluated over all 31 test sequences.
+
+\paragraph{Timestamp scaling.}
+Synthetic H5 files store timestamps in 100\,$\mu$s units, while real
+test recordings use 1\,$\mu$s units.  This 100$\times$ mismatch
+compresses the temporal distribution of events within voxel bins by a
+factor of 100 at test time, constituting a severe domain shift.
+All inference runs use \texttt{--test-timestamp-scale~1.0} to apply the
+real-data unit convention.
+
+\subsection{Implementation Details}
+
+Preprocessing converts raw H5 event files into voxel grids stored as
+HDF5 at 256$\times$448 (Phase 1) and 1280$\times$720 (Phase 2)
+resolution, requiring approximately 1.4\,MB and 11\,MB per frame
+respectively.  Training runs on a single NVIDIA A100-SXM4-80GB GPU.
+At batch size 16 and full 100\% resolution, one epoch over 179\,K
+frames takes approximately 2.5 hours.
+
+\subsection{Main Results}
+\label{sec:results}
+
+\cref{tab:main} summarises all submitted results alongside the SPADES
+dataset paper baselines \cite{spades2024}.
+
+\begin{table}[h]
+\centering
+\small
+\setlength{\tabcolsep}{4pt}
+\caption{Test-set results on SPADES.  $E_t$: relative translation
+error; $E_r$: geodesic rotation error (rad); $E$: composite score.
+Lower is better.  SPADES baselines are the Direct and Hybrid approaches
+reported in \cite{spades2024} on the same real test sequences.}
+\label{tab:main}
+\begin{tabular}{lccc}
+\toprule
+Method & $E_t$ & $E_r$ (rad) & $E$ \\
+\midrule
+SPADES Direct \cite{spades2024}  & 0.0513 & 1.416 & 1.47 \\
+SPADES Hybrid \cite{spades2024}  & 0.0334 & 1.378 & 1.41 \\
+\midrule
+CNN+GRU, $T{=}10$ (ours)         & 0.6722 & 1.6113 & 2.2835 \\
+DirectPoseCNN, $\lambda_t{=}2.0$, $\lambda_r{=}1.0$ (ours)
+                                  & 0.4105 & 1.6526 & \textbf{2.063} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{Frame-by-frame beats temporal modelling.}
+The CNN+GRU model scored 2.2835 ($E_t=0.6722$, $E_r=1.6113$\,rad)
+vs.\ 2.063 ($E_t=0.4105$, $E_r=1.6526$\,rad) for DirectPoseCNN.
+Translation error is 64\% higher under the temporal model, while
+rotation error is marginally better (1.6113 vs.\ 1.6526\,rad),
+suggesting the GRU captures orientation context but degrades
+translation predictions.  At a 10\,Hz sampling rate with 100\,ms
+voxel windows, consecutive frames share approximately 90\% of their
+event window, providing minimal new temporal information while
+increasing optimisation difficulty.
+
+\subsection{Loss Weight Ablation}
+\label{sec:ablation}
+
+We ablate the loss weights $(\lambda_t, \lambda_r)$ while holding all
+other hyperparameters fixed, resuming from the same Phase-1 checkpoint
+to ensure a fair comparison.
+
+\begin{table}[h]
+\centering
+\small
+\setlength{\tabcolsep}{5pt}
+\caption{Validation metrics for different loss weight combinations.
+All runs resume from the same epoch-29 checkpoint.}
+\label{tab:ablation}
+\begin{tabular}{ccrrc}
+\toprule
+$\lambda_t$ & $\lambda_r$ & Val $E_t$ (\%) & Val $E_r$ (°) & Note \\
+\midrule
+2.0 & 1.0 & 14.64 & 92.46 & Submitted (best) \\
+1.5 & 2.0 & 15.01 & 91.58 & Best val rotation \\
+0.0 & 1.0 & $\approx$15.2 & $\approx$92.5 & Frozen trans.\ head \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Increasing $\lambda_r$ relative to $\lambda_t$ yields modest
+improvements in validation rotation error (−0.88° at best) but at the
+cost of elevated translation error (+0.37 pp).
+Freezing the translation head while training the rotation head and
+backbone causes the backbone features to shift, degrading translation
+despite the frozen FC head.  This confirms that the shared backbone
+tightly couples both tasks.
+
+The best rotation result ($91.58°$) was achieved at epoch 37 with
+$\lambda_t=1.5$, $\lambda_r=2.0$; however, the improvement was not
+submitted due to time constraints.
+
+\subsection{Domain Gap Analysis}
+\label{sec:domaingap}
+
+\cref{tab:gap} and \cref{fig:domaingap} quantify the
+validation-to-test domain gap.
+
+\begin{table}[h]
+\centering
+\small
+\setlength{\tabcolsep}{5pt}
+\caption{Synthetic-to-real domain gap for our best DirectPoseCNN.}
+\label{tab:gap}
+\begin{tabular}{lrr}
+\toprule
+Metric & Val (synthetic) & Test (real) \\
+\midrule
+Translation error & 14.64\% & 41.05\% \\
+Rotation error    & 92.46°  & 94.69° \\
+\midrule
+Amplification     & $\times$2.77 & $+$2.23° \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{figure}[h]
+  \centering
+  \includegraphics[width=\linewidth]{figure/domain_gap.png}
+  \caption{Synthetic-to-real domain gap for both submitted models.
+  Translation error amplifies by $2.77\times$ (DirectPoseCNN) and
+  $3.24\times$ (CNN+GRU) from validation to test, while rotation error
+  changes by less than $0.5°$, indicating the domain shift primarily
+  affects translation.}
+  \label{fig:domaingap}
+\end{figure}
+
+Translation error is amplified by 2.77$\times$ from validation to
+test, while rotation error increases by only 2.23°.  The large
+translation amplification likely stems from the timestamp-unit mismatch
+(100$\times$), which alters the density of events per voxel bin.
+Because rotation depends primarily on the \emph{spatial pattern} of
+events and translation depends on absolute scale, the former is more
+robust to temporal rescaling.
+
+\subsection{Leaderboard Context}
+\label{sec:leaderboard}
+
+\cref{tab:leaderboard} shows the final public leaderboard.
+
+\begin{table}[h]
+\centering
+\small
+\setlength{\tabcolsep}{4pt}
+\caption{Final SPARKS 2026 leaderboard (top 5 and our entry).}
+\label{tab:leaderboard}
+\begin{tabular}{clccc}
+\toprule
+Rank & Team & $E_t$ & $E_r$ (rad) & $E$ \\
+\midrule
+1 & National Key Lab & 0.0146 & 0.0355 & \textbf{0.0501} \\
+2 & NSSC\_UCAS        & 0.0230 & 0.0331 & 0.0561 \\
+3 & haoranhuang       & 0.1464 & 0.5562 & 0.7026 \\
+4 & pruthj            & 0.1335 & 0.9101 & 1.0436 \\
+5 & csu\_nuaa\_pang   & 0.3340 & 0.7724 & 1.1064 \\
+\midrule
+12 & santhoshsrs (ours) & 0.4105 & 1.6526 & 2.063 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The top two teams achieve near-perfect translation
+($E_t \approx 0.02$), suggesting they employ model-based methods
+or exploit explicit 3D spacecraft geometry rather than relying on
+learned translation from data alone.
+
+% -----------------------------------------------------------------------
+\section{Discussion}
+\label{sec:discussion}
+
+\paragraph{Geodesic loss is necessary.}
+Preliminary experiments with $\ell_2$ quaternion loss failed to
+converge reliably (rotation errors $> 150°$).  Geodesic distance in
+\cref{eq:loss} provides well-defined gradients across the entire
+SO(3) manifold and handles the sign ambiguity of quaternion
+representation.
+
+\paragraph{Timestamp normalisation is critical for domain transfer.}
+The 100$\times$ timestamp-unit mismatch between synthetic and real data
+is the dominant source of domain shift.  Normalising timestamps within
+each event window to a fixed range $[0, T_{\text{window}}]$ before
+constructing voxel grids would make the representation invariant to
+this shift and is a straightforward improvement for future work.
+
+\paragraph{Temporal modelling does not help at 10\,Hz.}
+With 100\,ms voxel windows and 10\,Hz pose sampling, adjacent frames
+are highly correlated.  Temporal modelling with a GRU introduces
+additional complexity without providing new information.  A higher
+pose sampling rate or shorter event windows might benefit from
+temporal aggregation.
+
+\paragraph{GlobalAvgPool destroys spatial information for keypoints.}
+Our initial keypoint regressor, which applied GlobalAvgPool before the
+regression head, was fundamentally limited to $\approx$160\,px
+keypoint error because all spatial information was discarded.
+Switching to a heatmap decoder (removing the pooling operation)
+is the correct architectural choice; preliminary experiments showed
+expected error of 20–40\,px.  Future work should complete the
+heatmap training and evaluate the full keypoint+PnP pipeline.
+
+\paragraph{Loss weight coupling.}
+Because translation and rotation heads share the ResNet-50 backbone,
+tuning $\lambda_t$ and $\lambda_r$ creates implicit trade-offs:
+improving rotation can hurt translation and vice versa.  Disentangling
+these tasks, for instance with separate backbone branches or
+task-specific normalisation layers, could provide more independent control.
+
+% -----------------------------------------------------------------------
+\section{Conclusion}
+\label{sec:conclusion}
+
+We presented an event-camera spacecraft pose estimation pipeline
+evaluated on the SPADES dataset as part of the SPARKS Challenge at
+CVPR 2026.  Our best result, a composite pose error of \textbf{2.063},
+is achieved by a ResNet-50 direct regression model trained with
+geodesic rotation loss on 3-channel exponential-decay event voxel grids.
+We found that: (i) single-frame prediction outperforms temporal
+modelling at 10\,Hz; (ii) synthetic-to-real translation error is
+amplified $\approx$2.8$\times$ at test time due to a 100$\times$
+timestamp-unit mismatch; and (iii) loss weight tuning for the
+rotation head is constrained by the shared backbone.
+Future work will focus on timestamp-invariant voxel construction,
+a completed heatmap keypoint regressor with PnP, and explicit domain
+normalisation to reduce the synthetic-to-real gap.
+
+% -----------------------------------------------------------------------
+{\small
+\bibliographystyle{ieeenat_fullname}
+\bibliography{references}
+}
+
+\end{document}
